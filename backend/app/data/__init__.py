@@ -1,0 +1,1 @@
+# German Curriculum Data Package

@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Environment files
+.env
+!.env.example
+
+# Build artifacts
+frontend/dist/
+.pytest_cache/
+
+# Uploads
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# OS generated
+.DS_Store
+Thumbs.db
