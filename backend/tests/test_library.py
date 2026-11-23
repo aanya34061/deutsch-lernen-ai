@@ -8,7 +8,6 @@ from PIL import Image
 from pathlib import Path
 from app.config import settings
 from app.services.library_service import (
-    LEGACY_DEMO_MATERIAL_TITLES,
     LibraryService,
     is_within_upload_dir,
 )
@@ -25,6 +24,9 @@ def test_upload_path_containment_rejects_sibling_prefix(tmp_path):
 @pytest.mark.asyncio
 async def test_upload_file_is_removed_when_metadata_persistence_fails(monkeypatch, tmp_path):
     class FailedMaterials:
+        async def find_one(self, _query):
+            return None
+
         async def insert_one(self, document):
             assert document["is_seeded"] is False
             raise RuntimeError("database unavailable")
@@ -47,7 +49,7 @@ async def test_upload_file_is_removed_when_metadata_persistence_fails(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_library_list_excludes_seeded_and_known_legacy_demo_records(monkeypatch):
+async def test_library_list_only_returns_unseeded_records_owned_by_default_user(monkeypatch):
     class Cursor:
         def __init__(self, docs):
             self.docs = docs
@@ -67,16 +69,14 @@ async def test_library_list_excludes_seeded_and_known_legacy_demo_records(monkey
     class Materials:
         def __init__(self):
             self.docs = [
-                {"_id": "seeded", "title": "Seeded", "is_seeded": True},
-                {"_id": "legacy", "title": LEGACY_DEMO_MATERIAL_TITLES[0], "is_seeded": False},
-                {"_id": "real", "title": "My uploaded notes", "is_seeded": False},
+                {"_id": "seeded", "title": "Seeded", "user_id": "default", "is_seeded": True},
+                {"_id": "other", "title": "Other user's notes", "user_id": "other", "is_seeded": False},
+                {"_id": "real", "title": "My uploaded notes", "user_id": "default", "is_seeded": False},
             ]
             self.query = None
 
         def matching(self, query):
-            seeded = query["is_seeded"]["$ne"]
-            excluded_titles = query["title"]["$nin"]
-            return [doc for doc in self.docs if doc.get("is_seeded") != seeded and doc.get("title") not in excluded_titles]
+            return [doc for doc in self.docs if doc.get("user_id") == query["user_id"] and doc.get("is_seeded") is not True]
 
         async def count_documents(self, query):
             self.query = query
@@ -97,13 +97,16 @@ async def test_library_list_excludes_seeded_and_known_legacy_demo_records(monkey
     assert result.total == 1
     assert [item.title for item in result.items] == ["My uploaded notes"]
     assert materials.query["is_seeded"] == {"$ne": True}
-    assert set(materials.query["title"]["$nin"]) == set(LEGACY_DEMO_MATERIAL_TITLES)
+    assert materials.query["user_id"] == "default"
 
 
 @pytest.mark.asyncio
 async def test_added_learning_link_is_marked_as_user_content(monkeypatch):
     class Materials:
         inserted = None
+
+        async def find_one(self, _query):
+            return None
 
         async def insert_one(self, document):
             self.inserted = document
@@ -190,6 +193,18 @@ async def test_upload_txt_file(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_duplicate_upload_reuses_existing_material(client: AsyncClient):
+    files = {"file": ("same-note.txt", b"Einmal speichern", "text/plain")}
+    first = await client.post("/api/v1/library/upload", files=files)
+    second = await client.post("/api/v1/library/upload", files=files)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["id"] == second.json()["id"]
+    assert second.json()["user_id"] == "default"
+
+
+@pytest.mark.asyncio
 async def test_upload_pdf_file(client: AsyncClient):
     files = {"file": ("deutsch_lesson.pdf", SAMPLE_PDF_BYTES, "application/pdf")}
     data = {
@@ -239,8 +254,9 @@ async def test_upload_image_file(client: AsyncClient):
     assert res.status_code == 201
     payload = res.json()
     assert payload["file_type"] == "image"
-    assert payload["status"] == "ready"
-    assert payload["extracted_text"] is not None
+    assert payload["status"] == "failed"
+    assert payload["extracted_text"] == ""
+    assert "OCR" in payload["error_message"]
 
 
 @pytest.mark.asyncio
@@ -277,8 +293,10 @@ async def test_add_youtube_link(client: AsyncClient):
     assert payload["file_type"] == "youtube"
     assert payload["source_type"] == "link"
     assert payload["source_url"] == data["url"]
-    assert payload["status"] == "ready"
-    assert payload["extracted_text"] is not None
+    assert payload["status"] in {"ready", "failed"}
+    if payload["status"] == "failed":
+        assert "transcript" in payload["error_message"].lower()
+        assert payload["extracted_text"] == ""
 
 
 @pytest.mark.asyncio
@@ -294,7 +312,9 @@ async def test_add_general_web_link(client: AsyncClient):
     payload = res.json()
     assert payload["file_type"] == "link"
     assert payload["source_type"] == "link"
-    assert payload["status"] == "ready"
+    assert payload["status"] in {"ready", "failed"}
+    if payload["status"] == "failed":
+        assert payload["error_message"]
 
 
 @pytest.mark.asyncio

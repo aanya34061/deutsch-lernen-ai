@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { submitExercise } from '../../services/api';
 import { speakGerman } from '../../utils/speech';
 
@@ -9,10 +9,24 @@ export default function ExerciseRunner({ exercises = [], onComplete }) {
   const [matchingPairs, setMatchingPairs] = useState({}); // for matching: { "der Hund": "the dog" }
   const [activeGermanPair, setActiveGermanPair] = useState(null); // matching state
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
   const [result, setResult] = useState(null);
   const [history, setHistory] = useState([]); // list of results
 
   const currentEx = exercises[currentIndex];
+  const shuffledMatchingEnglish = useMemo(() => {
+    const pairs = currentEx?.matching_pairs || [];
+    const values = pairs.map((pair) => pair.english);
+    const original = values.join('\u0000');
+    for (let index = values.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(Math.random() * (index + 1));
+      [values[index], values[swapIndex]] = [values[swapIndex], values[index]];
+    }
+    if (values.length > 1 && values.join('\u0000') === original) {
+      values.push(values.shift());
+    }
+    return values;
+  }, [currentEx?.id]);
 
   useEffect(() => {
     // Reset inputs when switching exercises
@@ -21,6 +35,7 @@ export default function ExerciseRunner({ exercises = [], onComplete }) {
     setMatchingPairs({});
     setActiveGermanPair(null);
     setResult(null);
+    setSubmitError('');
   }, [currentIndex, currentEx?.id]);
 
   if (!exercises || exercises.length === 0) {
@@ -111,19 +126,22 @@ export default function ExerciseRunner({ exercises = [], onComplete }) {
     if (currentEx.type === 'sentence_order') {
       payload = selectedTokens.join(' ');
     } else if (currentEx.type === 'matching') {
+      const requiredPairs = currentEx.matching_pairs || [];
+      if (Object.keys(matchingPairs).length !== requiredPairs.length) return;
       payload = matchingPairs;
     }
 
-    if (!payload && payload !== false) return;
+    if (currentEx.type !== 'matching' && !String(payload ?? '').trim()) return;
 
     try {
       setSubmitting(true);
+      setSubmitError('');
       const res = await submitExercise(currentEx.id, payload);
       setResult(res);
       setHistory((prev) => [...prev, res]);
     } catch (err) {
       console.error('Failed to submit exercise answer:', err);
-      alert('Error submitting answer: ' + (err.response?.data?.detail || err.message));
+      setSubmitError(err.response?.data?.detail || err.message || 'Could not check this answer. Please try again.');
     } finally {
       setSubmitting(false);
     }
@@ -180,11 +198,6 @@ export default function ExerciseRunner({ exercises = [], onComplete }) {
       case 'translate':
         return (
           <div className="my-3">
-            {currentEx.prompt && (
-              <div className="p-3 mb-2 bg-light border rounded text-dark fs-5 fw-medium">
-                {currentEx.prompt}
-              </div>
-            )}
             <div className="input-group">
               <input
                 type="text"
@@ -259,7 +272,7 @@ export default function ExerciseRunner({ exercises = [], onComplete }) {
 
       case 'matching': {
         const germanList = (currentEx.matching_pairs || []).map((p) => p.german);
-        const englishList = (currentEx.matching_pairs || []).map((p) => p.english);
+        const englishList = shuffledMatchingEnglish;
 
         return (
           <div className="my-3">
@@ -308,7 +321,7 @@ export default function ExerciseRunner({ exercises = [], onComplete }) {
                           isPaired ? 'btn-success text-white' : 'btn-outline-secondary bg-white text-dark'
                         }`}
                         onClick={() => !result && handleMatchingEnglishClick(eWord)}
-                        disabled={Boolean(result)}
+                        disabled={Boolean(result) || (isPaired && matchedGerman !== activeGermanPair)}
                       >
                         {eWord}
                       </button>
@@ -346,11 +359,19 @@ export default function ExerciseRunner({ exercises = [], onComplete }) {
       <div className="card-body p-4">
         {/* Question Title */}
         <h5 className="fw-bold text-dark mb-2">{currentEx.question}</h5>
+        {currentEx.prompt && (
+          <p className="text-muted mb-2">{currentEx.prompt}</p>
+        )}
 
         {/* Input Area */}
         {renderQuestionInput()}
 
         {/* Feedback Alert After Submission */}
+        {submitError && (
+          <div className="alert alert-danger mt-3 mb-0" role="alert">
+            {submitError}
+          </div>
+        )}
         {result && (
           <div
             className={`alert ${
@@ -395,8 +416,8 @@ export default function ExerciseRunner({ exercises = [], onComplete }) {
               onClick={handleSubmit}
               disabled={
                 submitting ||
-                (currentEx.type === 'sentence_order' && selectedTokens.length === 0) ||
-                (currentEx.type === 'matching' && Object.keys(matchingPairs).length === 0) ||
+                (currentEx.type === 'sentence_order' && selectedTokens.length !== (currentEx.options || []).length) ||
+                (currentEx.type === 'matching' && Object.keys(matchingPairs).length !== (currentEx.matching_pairs || []).length) ||
                 (currentEx.type !== 'sentence_order' && currentEx.type !== 'matching' && !userAnswer)
               }
             >

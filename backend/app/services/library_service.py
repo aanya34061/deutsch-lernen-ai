@@ -2,6 +2,7 @@ import os
 import re
 import uuid
 import logging
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -23,14 +24,6 @@ from app.services.extractor_service import ExtractorService
 
 logger = logging.getLogger("german_app.library")
 
-# These titles came from the original demo Library seed. Keep this exact list in
-# the backend query as a guard in case startup labeling could not run.
-LEGACY_DEMO_MATERIAL_TITLES = (
-    "A1 Begrüßungen und Vorstellungen (Greetings Guide)",
-    "Deutsche Artikel im Alltag (Articles in Daily Life)",
-    "Im Café bestellen (Ordering in a German Café)",
-)
-
 ALLOWED_EXTENSIONS = {
     ".pdf": "pdf",
     ".docx": "docx",
@@ -38,6 +31,11 @@ ALLOWED_EXTENSIONS = {
     ".jpg": "image",
     ".jpeg": "image",
     ".png": "image",
+    ".webp": "image",
+    ".bmp": "image",
+    ".tif": "image",
+    ".tiff": "image",
+    ".gif": "image",
 }
 
 def str_id(doc: dict) -> dict:
@@ -71,11 +69,20 @@ def is_within_upload_dir(path: Path, upload_dir: Path) -> bool:
     except ValueError:
         return False
 
+
+def clean_extracted_text(value: Optional[str]) -> str:
+    """Normalize extracted document text while retaining page markers and paragraphs."""
+    text = (value or "").replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[^\S\n\t]+", " ", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
 class LibraryService:
     @staticmethod
     async def upload_file(
         file: UploadFile,
-        cefr_level: str = "A1",
+        cefr_level: str = "Unknown",
         topic: str = "General",
         title: Optional[str] = None,
         description: Optional[str] = None
@@ -98,9 +105,9 @@ class LibraryService:
             )
 
         file_type = ALLOWED_EXTENSIONS[ext]
-        level_upper = cefr_level.upper() if cefr_level else "A1"
+        level_upper = cefr_level.title() if cefr_level and cefr_level.lower() == "unknown" else (cefr_level.upper() if cefr_level else "Unknown")
         if level_upper not in SUPPORTED_CEFR_LEVELS:
-            level_upper = "A1"
+            level_upper = "Unknown"
 
         # 2. Prevent path traversal and generate unique secure storage filename
         unique_prefix = uuid.uuid4().hex
@@ -118,6 +125,7 @@ class LibraryService:
         # 3. Stream file to disk and validate size limit
         max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
         total_size = 0
+        content_hasher = hashlib.sha256()
         try:
             with open(destination_path, "wb") as f:
                 while chunk := await file.read(1024 * 1024):  # 1MB chunks
@@ -132,6 +140,7 @@ class LibraryService:
                             detail=f"File exceeds maximum allowed size of {settings.MAX_UPLOAD_SIZE_MB}MB."
                         )
                     f.write(chunk)
+                    content_hasher.update(chunk)
         except HTTPException:
             raise
         except Exception:
@@ -144,9 +153,12 @@ class LibraryService:
 
         # 4. Extract text based on file format
         extracted_info = ExtractorService.extract_file_content(str(destination_path), file_type)
-        extracted_text = extracted_info.get("text", "")
+        extracted_text = clean_extracted_text(extracted_info.get("text"))
+        has_text = extracted_info.get("has_text", bool(extracted_text)) and bool(extracted_text)
+        if not has_text:
+            extracted_text = ""
         summary_text = extracted_info.get("summary") or f"{file_type.upper()} material: {safe_original_name}"
-        error_msg = extracted_info.get("error")
+        error_msg = extracted_info.get("error") or (None if has_text else "No readable text could be extracted from this file.")
 
         material_title = title.strip() if title and title.strip() else Path(safe_original_name).stem
 
@@ -161,13 +173,17 @@ class LibraryService:
             "file_size": total_size,
             "source_type": "upload",
             "is_seeded": False,
+            "user_id": "default",
+            "upload_hash": content_hasher.hexdigest(),
             "source_url": None,
             "cefr_level": level_upper,
             "topic": topic.strip() if topic and topic.strip() else "General",
             "description": description.strip() if description else None,
             "summary": summary_text,
             "extracted_text": extracted_text,
-            "status": "ready" if not error_msg else "failed",
+            "status": "ready" if has_text and not error_msg else "failed",
+            "processing_status": "uploaded" if has_text and not error_msg else "failed",
+            "processing_error": error_msg,
             "error_message": error_msg,
             "chunks_count": 1 if extracted_text and not error_msg else 0,
             "tags": [file_type, level_upper],
@@ -176,6 +192,30 @@ class LibraryService:
         }
 
         db = get_db()
+        duplicate = await db.materials.find_one({"user_id": "default", "upload_hash": material_doc["upload_hash"], "is_seeded": {"$ne": True}})
+        if duplicate:
+            if duplicate.get("status") == "failed":
+                retry_fields = {key: material_doc[key] for key in (
+                    "extracted_text", "summary", "status", "error_message", "chunks_count", "updated_at"
+                )}
+                retry_fields["indexing_status"] = "not_indexed"
+                retry_fields["indexing_error"] = None
+                await db.materials.update_one({"_id": duplicate["_id"]}, {"$set": retry_fields})
+                if extracted_text and not error_msg:
+                    try:
+                        from app.services.retrieval_service import RetrievalService
+                        index_res = await RetrievalService.index_material(str(duplicate["_id"]))
+                        retry_fields["indexing_status"] = index_res.get("status", "failed")
+                        retry_fields["indexing_error"] = index_res.get("error")
+                        retry_fields["chunks_count"] = index_res.get("chunks_count", 0)
+                    except Exception as idx_err:
+                        retry_fields["indexing_status"] = "failed"
+                        retry_fields["indexing_error"] = str(idx_err)
+                        logger.warning("Retry indexing failed for %s: %s", duplicate["_id"], idx_err)
+                    await db.materials.update_one({"_id": duplicate["_id"]}, {"$set": retry_fields})
+                duplicate.update(retry_fields)
+            destination_path.unlink(missing_ok=True)
+            return MaterialResponse(**str_id(duplicate))
         try:
             result = await db.materials.insert_one(material_doc)
         except Exception:
@@ -187,16 +227,6 @@ class LibraryService:
             raise
         material_id_str = str(result.inserted_id)
         material_doc["_id"] = material_id_str
-
-        # Phase 4: Index material chunks into knowledge_chunks collection
-        if extracted_text and not error_msg:
-            try:
-                from app.services.retrieval_service import RetrievalService
-                index_res = await RetrievalService.index_material(material_id_str)
-                material_doc["indexing_status"] = index_res.get("status", "indexed")
-                material_doc["chunks_count"] = index_res.get("chunks_count", 1)
-            except Exception as idx_err:
-                logger.warning(f"Background indexing error for {material_id_str}: {idx_err}")
 
         return MaterialResponse(**material_doc)
 
@@ -210,9 +240,9 @@ class LibraryService:
                 detail="URL must start with http:// or https://"
             )
 
-        level_upper = link_data.cefr_level.upper() if link_data.cefr_level else "A1"
+        level_upper = link_data.cefr_level.title() if link_data.cefr_level and link_data.cefr_level.lower() == "unknown" else (link_data.cefr_level.upper() if link_data.cefr_level else "Unknown")
         if level_upper not in SUPPORTED_CEFR_LEVELS:
-            level_upper = "A1"
+            level_upper = "Unknown"
 
         is_youtube = bool(ExtractorService.parse_youtube_video_id(url))
         file_type = "youtube" if is_youtube else "link"
@@ -228,9 +258,12 @@ class LibraryService:
             else (inferred_title or ("YouTube Video" if is_youtube else url))
         )
 
-        extracted_text = extracted_info.get("text", "")
+        extracted_text = clean_extracted_text(extracted_info.get("text"))
+        has_text = extracted_info.get("has_text", bool(extracted_text)) and bool(extracted_text)
+        if not has_text:
+            extracted_text = ""
         summary_text = extracted_info.get("summary") or f"Learning resource: {material_title}"
-        error_msg = extracted_info.get("error")
+        error_msg = extracted_info.get("error") or (None if has_text else "No accessible text or transcript was extracted from this link.")
 
         now_iso = datetime.now(timezone.utc).isoformat()
         material_doc = {
@@ -242,13 +275,16 @@ class LibraryService:
             "file_size": 0,
             "source_type": "link",
             "is_seeded": False,
+            "user_id": "default",
             "source_url": url,
             "cefr_level": level_upper,
             "topic": link_data.topic.strip() if link_data.topic and link_data.topic.strip() else "General",
             "description": link_data.description.strip() if link_data.description else None,
             "summary": summary_text,
             "extracted_text": extracted_text,
-            "status": "ready" if not error_msg else "failed",
+            "status": "ready" if has_text and not error_msg else "failed",
+            "processing_status": "uploaded" if has_text and not error_msg else "failed",
+            "processing_error": error_msg,
             "error_message": error_msg,
             "chunks_count": 1 if extracted_text and not error_msg else 0,
             "tags": [file_type, level_upper],
@@ -257,19 +293,32 @@ class LibraryService:
         }
 
         db = get_db()
+        duplicate = await db.materials.find_one({"user_id": "default", "source_url": url, "is_seeded": {"$ne": True}})
+        if duplicate:
+            if duplicate.get("status") == "failed":
+                retry_fields = {key: material_doc[key] for key in (
+                    "title", "description", "extracted_text", "summary", "status", "error_message", "chunks_count", "updated_at"
+                )}
+                retry_fields["indexing_status"] = "not_indexed"
+                retry_fields["indexing_error"] = None
+                await db.materials.update_one({"_id": duplicate["_id"]}, {"$set": retry_fields})
+                if extracted_text and not error_msg:
+                    try:
+                        from app.services.retrieval_service import RetrievalService
+                        index_res = await RetrievalService.index_material(str(duplicate["_id"]))
+                        retry_fields["indexing_status"] = index_res.get("status", "failed")
+                        retry_fields["indexing_error"] = index_res.get("error")
+                        retry_fields["chunks_count"] = index_res.get("chunks_count", 0)
+                    except Exception as idx_err:
+                        retry_fields["indexing_status"] = "failed"
+                        retry_fields["indexing_error"] = str(idx_err)
+                        logger.warning("Retry indexing failed for %s: %s", duplicate["_id"], idx_err)
+                    await db.materials.update_one({"_id": duplicate["_id"]}, {"$set": retry_fields})
+                duplicate.update(retry_fields)
+            return MaterialResponse(**str_id(duplicate))
         result = await db.materials.insert_one(material_doc)
         material_id_str = str(result.inserted_id)
         material_doc["_id"] = material_id_str
-
-        # Phase 4: Index material chunks into knowledge_chunks collection
-        if extracted_text and not error_msg:
-            try:
-                from app.services.retrieval_service import RetrievalService
-                index_res = await RetrievalService.index_material(material_id_str)
-                material_doc["indexing_status"] = index_res.get("status", "indexed")
-                material_doc["chunks_count"] = index_res.get("chunks_count", 1)
-            except Exception as idx_err:
-                logger.warning(f"Background indexing error for {material_id_str}: {idx_err}")
 
         return MaterialResponse(**material_doc)
 
@@ -286,12 +335,13 @@ class LibraryService:
         """Query materials with optional filters, search, and pagination."""
         db = get_db()
         query: Dict[str, Any] = {
+            "user_id": "default",
             "is_seeded": {"$ne": True},
-            "title": {"$nin": list(LEGACY_DEMO_MATERIAL_TITLES)},
         }
 
-        if level and level.upper() in SUPPORTED_CEFR_LEVELS:
-            query["cefr_level"] = level.upper()
+        normalized_level = "Unknown" if level and level.lower() == "unknown" else (level.upper() if level else None)
+        if normalized_level and normalized_level in SUPPORTED_CEFR_LEVELS:
+            query["cefr_level"] = normalized_level
         if topic and topic.strip():
             query["topic"] = {"$regex": f"^{re.escape(topic.strip())}$", "$options": "i"}
         if file_type and file_type.strip():
@@ -328,7 +378,7 @@ class LibraryService:
             )
 
         db = get_db()
-        doc = await db.materials.find_one({"_id": obj_id})
+        doc = await db.materials.find_one({"_id": obj_id, "user_id": "default", "is_seeded": {"$ne": True}})
         if not doc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -348,7 +398,7 @@ class LibraryService:
             )
 
         db = get_db()
-        doc = await db.materials.find_one({"_id": obj_id})
+        doc = await db.materials.find_one({"_id": obj_id, "user_id": "default", "is_seeded": {"$ne": True}})
         if not doc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -361,13 +411,14 @@ class LibraryService:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Title cannot be empty.")
             updates["title"] = update_data.title.strip()
         if update_data.cefr_level is not None:
-            lvl = update_data.cefr_level.upper()
+            lvl = "Unknown" if update_data.cefr_level.lower() == "unknown" else update_data.cefr_level.upper()
             if lvl not in SUPPORTED_CEFR_LEVELS:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Invalid CEFR level: {lvl}. Allowed: {SUPPORTED_CEFR_LEVELS}"
                 )
             updates["cefr_level"] = lvl
+            updates["level_manually_set"] = True
         if update_data.topic is not None:
             updates["topic"] = update_data.topic.strip() or "General"
         if update_data.description is not None:
@@ -406,7 +457,7 @@ class LibraryService:
             )
 
         db = get_db()
-        doc = await db.materials.find_one({"_id": obj_id})
+        doc = await db.materials.find_one({"_id": obj_id, "user_id": "default", "is_seeded": {"$ne": True}})
         if not doc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -427,6 +478,10 @@ class LibraryService:
 
         # Delete database record
         await db.materials.delete_one({"_id": obj_id})
+
+        # Remove generated study artifacts so they cannot outlive their source.
+        await db.study_notes.delete_many({"material_id": material_id, "user_id": "default"})
+        await db.exercises.delete_many({"material_id": material_id, "user_id": "default", "origin": "ai_generated"})
 
         # Phase 4: Clean up indexed chunks in knowledge_chunks collection
         try:
@@ -453,7 +508,7 @@ class LibraryService:
             )
 
         db = get_db()
-        doc = await db.materials.find_one({"_id": obj_id})
+        doc = await db.materials.find_one({"_id": obj_id, "user_id": "default", "is_seeded": {"$ne": True}})
         if not doc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -483,7 +538,12 @@ class LibraryService:
             ".txt": "text/plain",
             ".jpg": "image/jpeg",
             ".jpeg": "image/jpeg",
-            ".png": "image/png"
+            ".png": "image/png",
+            ".webp": "image/webp",
+            ".bmp": "image/bmp",
+            ".tif": "image/tiff",
+            ".tiff": "image/tiff",
+            ".gif": "image/gif",
         }
         media_type = media_types.get(ext, "application/octet-stream")
         return file_path, original_name, media_type

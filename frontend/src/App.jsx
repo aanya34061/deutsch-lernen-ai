@@ -5,6 +5,8 @@ import Sidebar from './components/Sidebar';
 import Footer from './components/Footer';
 import Dashboard from './pages/Dashboard';
 import LibraryPage from './pages/LibraryPage';
+import NotesPage from './pages/NotesPage';
+import QuestionBankPage from './pages/QuestionBankPage';
 import LessonsPage from './pages/LessonsPage';
 import LessonDetailPage from './pages/LessonDetailPage';
 import VocabularyPage from './pages/VocabularyPage';
@@ -125,6 +127,8 @@ export default function App() {
               path="/library"
               element={<LibraryPage currentLevel={currentLevel} summary={summary} onRefreshDashboard={fetchData} />}
             />
+            <Route path="/notes" element={<NotesPage />} />
+            <Route path="/question-bank" element={<QuestionBankPage />} />
 
             {/* 3. Curriculum & Lessons (Phase 3) */}
             <Route

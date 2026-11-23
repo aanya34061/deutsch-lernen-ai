@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "qwen2.5:3b"
     OLLAMA_EMBED_MODEL: str = "nomic-embed-text"
-    OLLAMA_TIMEOUT_SECONDS: float = 30.0
+    OLLAMA_TIMEOUT_SECONDS: float = 180.0
     STT_PROVIDER: str = "browser"
     TTS_PROVIDER: str = "browser"
     

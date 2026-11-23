@@ -1,10 +1,8 @@
 import React, { useState } from 'react';
 import { addLearningLink } from '../../services/api';
 
-export default function AddLinkForm({ currentLevel, onLinkAdded, onError }) {
+export default function AddLinkForm({ onLinkAdded, onError }) {
   const [url, setUrl] = useState('');
-  const [level, setLevel] = useState(currentLevel || 'A1');
-  const [topic, setTopic] = useState('General');
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -22,15 +20,17 @@ export default function AddLinkForm({ currentLevel, onLinkAdded, onError }) {
       setSubmitting(true);
       const res = await addLearningLink({
         url: url.trim(),
-        cefr_level: level,
-        topic: topic,
         title: title.trim() || undefined,
         description: description.trim() || undefined,
       });
 
-      setUrl('');
-      setTitle('');
-      setDescription('');
+      if (res.status === 'failed') {
+        onError(res.error_message || 'The link was saved but could not be processed. You can retry.');
+      } else {
+        setUrl('');
+        setTitle('');
+        setDescription('');
+      }
       onLinkAdded(res);
     } catch (err) {
       console.error('Failed to add link:', err);
@@ -45,7 +45,7 @@ export default function AddLinkForm({ currentLevel, onLinkAdded, onError }) {
       <div className="card-body p-4">
         <h5 className="card-title fw-bold mb-3 d-flex align-items-center gap-2">
           <i className="bi bi-link-45deg text-danger fs-4"></i>
-          Add Learning Link (YouTube / Web)
+          Add a learning URL
         </h5>
         <p className="text-muted small mb-3">
           Add German YouTube video lessons or web articles. Transcripts and captions will be extracted automatically when accessible.
@@ -83,41 +83,7 @@ export default function AddLinkForm({ currentLevel, onLinkAdded, onError }) {
               )}
             </div>
 
-            <div className="col-md-3">
-              <label className="form-label small fw-semibold">Target Level</label>
-              <select
-                className="form-select form-select-sm"
-                value={level}
-                onChange={(e) => setLevel(e.target.value)}
-                disabled={submitting}
-              >
-                {['A1', 'A2', 'B1', 'B2', 'C1', 'C2'].map((lvl) => (
-                  <option key={lvl} value={lvl}>
-                    {lvl} {lvl === currentLevel ? '(Active)' : ''}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="col-md-3">
-              <label className="form-label small fw-semibold">Topic / Skill</label>
-              <select
-                className="form-select form-select-sm"
-                value={topic}
-                onChange={(e) => setTopic(e.target.value)}
-                disabled={submitting}
-              >
-                <option value="General">General / Overview</option>
-                <option value="Hören">Hören (Listening / Video)</option>
-                <option value="Grammar">Grammar (Grammatik)</option>
-                <option value="Vocabulary">Vocabulary (Wortschatz)</option>
-                <option value="Lesen">Lesen (Reading)</option>
-                <option value="Schreiben">Schreiben (Writing)</option>
-                <option value="Sprechen">Sprechen (Speaking)</option>
-              </select>
-            </div>
-
-            <div className="col-md-6">
+            <div className="col-12">
               <label className="form-label small fw-semibold">Title (Optional)</label>
               <input
                 type="text"

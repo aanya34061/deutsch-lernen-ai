@@ -12,6 +12,9 @@ class SentenceExample(BaseModel):
     english: str
     notes: Optional[str] = None
 
+class DialogueLine(SentenceExample):
+    speaker: Optional[str] = None
+
 class VocabularySnippet(BaseModel):
     word: str
     article: Optional[str] = ""  # der, die, das, or empty
@@ -33,12 +36,19 @@ class LessonBase(BaseModel):
     order: int = 1
     estimated_minutes: int = 15
     objectives: List[str] = []
+    introduction_en: Optional[str] = None
     explanation_en: str
+    sentence_patterns: List[str] = []
     grammar_rules: List[GrammarRule] = []
     examples: List[SentenceExample] = []
+    practical_dialogue: List[DialogueLine] = []
     vocabulary: List[VocabularySnippet] = []
     common_mistakes: List[CommonMistake] = []
+    important_notes: List[str] = []
     summary_en: str
+    publication_status: str = "draft"
+    module_id: Optional[str] = None
+    topic_id: Optional[str] = None
     source_material_id: Optional[str] = None
     source_material_title: Optional[str] = None
     source_text: Optional[str] = None
@@ -62,6 +72,8 @@ class LessonSummary(BaseModel):
     title: str
     cefr_level: str
     module_title: str
+    module_id: Optional[str] = None
+    topic_id: Optional[str] = None
     topic: str
     order: int
     estimated_minutes: int = 15
@@ -69,6 +81,7 @@ class LessonSummary(BaseModel):
     is_completed: bool = False
     exercises_count: int = 0
     source_material_id: Optional[str] = None
+    publication_status: str = "published"
 
     @model_validator(mode="before")
     @classmethod

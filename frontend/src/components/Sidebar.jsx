@@ -7,6 +7,8 @@ export default function Sidebar({ currentLevel, isOpen, onClose }) {
     { label: 'Lessons', path: '/lessons', icon: 'bi-journal-bookmark-fill', badge: 'A1-B1' },
     { label: 'Vocabulary', path: '/vocabulary', icon: 'bi-translate' },
     { label: 'My Library', path: '/library', icon: 'bi-folder2-open' },
+    { label: 'My Notes', path: '/notes', icon: 'bi-journal-text' },
+    { label: 'Question Bank', path: '/question-bank', icon: 'bi-patch-question' },
     { label: 'German Levels', path: '/levels', icon: 'bi-bar-chart-steps', badge: 'A1-C2' },
   ];
 

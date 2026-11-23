@@ -375,8 +375,8 @@ export default function TutorPage({ currentLevel }) {
               >
                 <option value="">All Uploaded Notes & Documents</option>
                 {materialsList.map((m) => (
-                  <option key={m.id || m._id} value={m.id || m._id}>
-                    {m.title} ({m.cefr_level || 'A1'})
+                  <option key={m.id || m._id} value={m.id || m._id} disabled={m.indexing_status !== 'indexed'}>
+                    {m.title} ({m.cefr_level || 'Unknown'}){m.indexing_status !== 'indexed' ? ' — not processed for AI' : ''}
                   </option>
                 ))}
               </select>

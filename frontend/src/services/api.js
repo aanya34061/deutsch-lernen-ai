@@ -49,6 +49,7 @@ export const getMaterial = async (materialId) => {
 
 export const uploadMaterial = async (formData, onProgress) => {
   const response = await api.post('/library/upload', formData, {
+    timeout: 120000,
     headers: {
       'Content-Type': 'multipart/form-data',
     },
@@ -74,6 +75,36 @@ export const updateMaterial = async (materialId, updateData) => {
 
 export const deleteMaterial = async (materialId) => {
   const response = await api.delete(`/library/${materialId}`);
+  return response.data;
+};
+
+export const retryMaterialProcessing = async (materialId) => {
+  const response = await api.post(`/library/${materialId}/process/retry`);
+  return response.data;
+};
+
+export const getStudyNotes = async (materialId) => {
+  const response = await api.get('/study/notes', { params: materialId ? { material_id: materialId } : {} });
+  return response.data;
+};
+
+export const saveStudyNote = async (noteId, markdown) => {
+  const response = await api.put(`/study/notes/${noteId}`, { markdown });
+  return response.data;
+};
+
+export const regenerateStudyNote = async (noteId) => {
+  const response = await api.post(`/study/notes/${noteId}/regenerate`);
+  return response.data;
+};
+
+export const deleteStudyNote = async (noteId) => {
+  const response = await api.delete(`/study/notes/${noteId}`);
+  return response.data;
+};
+
+export const getStudyQuestions = async (params = {}) => {
+  const response = await api.get('/study/questions', { params });
   return response.data;
 };
 
@@ -155,7 +186,9 @@ export const getTutorStatus = async () => {
 };
 
 export const sendTutorMessage = async (chatData) => {
-  const response = await api.post('/tutor/chat', chatData);
+  // Local model inference can take longer than the default API timeout,
+  // especially on its first request while Ollama loads the model.
+  const response = await api.post('/tutor/chat', chatData, { timeout: 210000 });
   return response.data;
 };
 
@@ -175,7 +208,8 @@ export const deleteTutorConversation = async (conversationId) => {
 };
 
 export const generateTutorExercises = async (data) => {
-  const response = await api.post('/tutor/exercises/generate', data);
+  // Local models can take a while to produce and validate a question set.
+  const response = await api.post('/tutor/exercises/generate', data, { timeout: 210000 });
   return response.data;
 };
 

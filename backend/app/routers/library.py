@@ -1,5 +1,5 @@
 from typing import Optional
-from fastapi import APIRouter, UploadFile, File, Form, Query, HTTPException, status
+from fastapi import APIRouter, UploadFile, File, Form, Query, HTTPException, status, BackgroundTasks
 from fastapi.responses import FileResponse
 from pymongo.errors import PyMongoError
 
@@ -9,14 +9,19 @@ from app.models.material import (
     LearningLinkCreate,
     MaterialListResponse
 )
-from app.services.library_service import LibraryService
+from app.services.library_service import LibraryService, clean_extracted_text
+from app.services.extractor_service import ExtractorService
+from app.services.material_intelligence_service import MaterialIntelligenceService
+from app.database import get_db
+from bson import ObjectId
 
 router = APIRouter(prefix="/library", tags=["Study Library"])
 
 @router.post("/upload", response_model=MaterialResponse, status_code=status.HTTP_201_CREATED)
 async def upload_material(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    cefr_level: str = Form("A1"),
+    cefr_level: str = Form("Unknown"),
     topic: str = Form("General"),
     title: Optional[str] = Form(None),
     description: Optional[str] = Form(None)
@@ -26,13 +31,16 @@ async def upload_material(
     Validates file format, size, sanitizes filename, extracts text, and indexes in database.
     """
     try:
-        return await LibraryService.upload_file(
+        material = await LibraryService.upload_file(
             file=file,
             cefr_level=cefr_level,
             topic=topic,
             title=title,
             description=description
         )
+        if material.status == "ready" and material.processing_status != "ready":
+            background_tasks.add_task(MaterialIntelligenceService.process_material, material.id)
+        return material
     except HTTPException:
         raise
     except (PyMongoError, RuntimeError) as db_err:
@@ -47,13 +55,16 @@ async def upload_material(
         )
 
 @router.post("/links", response_model=MaterialResponse, status_code=status.HTTP_201_CREATED)
-async def add_learning_link(link_data: LearningLinkCreate):
+async def add_learning_link(link_data: LearningLinkCreate, background_tasks: BackgroundTasks):
     """
     Add a German learning URL (YouTube video or web link).
     Fetches available captions or page text without bypassing restrictions.
     """
     try:
-        return await LibraryService.add_learning_link(link_data)
+        material = await LibraryService.add_learning_link(link_data)
+        if material.status == "ready" and material.processing_status != "ready":
+            background_tasks.add_task(MaterialIntelligenceService.process_material, material.id)
+        return material
     except HTTPException:
         raise
     except (PyMongoError, RuntimeError) as db_err:
@@ -162,7 +173,8 @@ async def get_material_file(material_id: str):
         return FileResponse(
             path=str(file_path),
             filename=original_filename,
-            media_type=media_type
+            media_type=media_type,
+            content_disposition_type="inline",
         )
     except HTTPException:
         raise
@@ -176,3 +188,46 @@ async def get_material_file(material_id: str):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not retrieve this file. Please try again."
         )
+
+@router.post("/{material_id}/process/retry")
+async def retry_material_processing(material_id: str, background_tasks: BackgroundTasks):
+    """Retry OCR when needed, then AI analysis, notes, questions, and indexing."""
+    material = await LibraryService.get_material(material_id)
+    if material.file_type == "image" and not (material.extracted_text or "").strip():
+        file_path, _, _ = await LibraryService.get_material_file(material_id)
+        extracted_info = ExtractorService.extract_file_content(str(file_path), "image")
+        extracted_text = clean_extracted_text(extracted_info.get("text"))
+        if not extracted_text:
+            error = extracted_info.get("error") or "OCR found no readable text in this image."
+            await get_db().materials.update_one(
+                {"_id": ObjectId(material_id), "user_id": "default", "is_seeded": {"$ne": True}},
+                {"$set": {"status": "failed", "error_message": error, "processing_error": error}},
+            )
+            raise HTTPException(status_code=422, detail=error)
+
+        await get_db().materials.update_one(
+            {"_id": ObjectId(material_id), "user_id": "default", "is_seeded": {"$ne": True}},
+            {"$set": {
+                "extracted_text": extracted_text,
+                "summary": extracted_info.get("summary"),
+                "status": "ready",
+                "error_message": None,
+                "processing_status": "uploaded",
+                "processing_error": None,
+                "indexing_status": "not_indexed",
+                "indexing_error": None,
+                "chunks_count": 0,
+            }},
+        )
+        material.status = "ready"
+        material.extracted_text = extracted_text
+
+    if material.status != "ready" or not (material.extracted_text or "").strip():
+        raise HTTPException(status_code=409, detail=material.error_message or "This source has no readable extracted text to process.")
+    oid = ObjectId(material_id)
+    await get_db().materials.update_one(
+        {"_id": oid, "user_id": "default", "is_seeded": {"$ne": True}},
+        {"$set": {"processing_status": "uploaded", "processing_error": None}},
+    )
+    background_tasks.add_task(MaterialIntelligenceService.process_material, material_id, True)
+    return {"status": "queued", "material_id": material_id}

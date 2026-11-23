@@ -22,6 +22,16 @@ class ExerciseService:
     @staticmethod
     async def get_exercise_by_id(exercise_id: str) -> Optional[Dict[str, Any]]:
         """Finds exercise definition across all lessons (static and custom in DB)."""
+        db = get_db()
+        # Prefer persisted curriculum content so safe manifest updates and edits
+        # are the same source used by lesson detail and answer evaluation.
+        curriculum_collection = getattr(db, "curriculum_lessons", None)
+        curriculum_doc = await curriculum_collection.find_one({"exercises.id": exercise_id}) if curriculum_collection is not None else None
+        if curriculum_doc:
+            for ex in curriculum_doc.get("exercises", []):
+                if ex.get("id") == exercise_id:
+                    return ex
+
         # 1. Search in static curriculum
         for lesson in ALL_STATIC_LESSONS:
             for ex in lesson.get("exercises", []):
@@ -29,7 +39,6 @@ class ExerciseService:
                     return ex
 
         # 2. Search in MongoDB lessons
-        db = get_db()
         doc = await db.lessons.find_one({"exercises.id": exercise_id})
         if doc:
             for ex in doc.get("exercises", []):
@@ -126,10 +135,10 @@ class ExerciseService:
         elif ex_type == "matching":
             # User answer is a dict mapping german -> english
             if isinstance(user_answer, dict) and isinstance(correct_answer, dict):
-                is_correct = True
+                is_correct = set(user_answer.keys()) == set(correct_answer.keys())
                 for de_key, en_val in correct_answer.items():
                     u_val = user_answer.get(de_key)
-                    if not u_val or ExerciseService._normalize_string(u_val) != ExerciseService._normalize_string(en_val):
+                    if u_val is None or ExerciseService._normalize_string(str(u_val)) != ExerciseService._normalize_string(str(en_val)):
                         is_correct = False
                         break
             else:

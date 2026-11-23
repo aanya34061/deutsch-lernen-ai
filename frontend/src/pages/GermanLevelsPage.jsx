@@ -43,7 +43,7 @@ export default function GermanLevelsPage({ currentLevel, onLevelChange }) {
         <div>
           <h3 className="fw-bold mb-1">German CEFR Learning Levels</h3>
           <p className="text-muted mb-0">
-            Progressive curriculum structure from foundational A1 to mastery C2.
+            A1–B1 is organized around practical integration-course situations, with grammar supporting each task. B2–C2 remain planned.
           </p>
         </div>
         <Link to="/" className="btn btn-outline-secondary btn-sm">

@@ -25,6 +25,7 @@ async def connect_to_mongo():
         logger.info(f"Successfully connected to MongoDB database: {settings.MONGODB_DB_NAME}")
         await init_db_indexes()
         await hide_legacy_demo_records()
+        await mark_interrupted_material_processing()
         await seed_initial_data_if_empty()
         await seed_practice_data_if_empty()
     except Exception as e:
@@ -64,11 +65,20 @@ async def init_db_indexes():
         # materials
         await db.materials.create_index([("cefr_level", 1), ("topic", 1)])
         await db.materials.create_index("status")
+        await db.materials.create_index([("user_id", 1), ("created_at", -1)])
+        await db.materials.create_index([("user_id", 1), ("upload_hash", 1)])
+        await db.study_notes.create_index([("user_id", 1), ("material_id", 1), ("is_current", 1)])
+        await db.study_notes.create_index([("material_id", 1), ("content_hash", 1)])
+        await db.exercises.create_index([("material_id", 1), ("content_hash", 1)])
         # chunks
         await db.knowledge_chunks.create_index("material_id")
         await db.knowledge_chunks.create_index([("cefr_level", 1), ("topic", 1)])
         # lessons
         await db.lessons.create_index([("cefr_level", 1), ("order", 1)])
+        await db.curriculum_modules.create_index("module_id", unique=True)
+        await db.curriculum_topics.create_index("topic_id", unique=True)
+        await db.curriculum_lessons.create_index("lesson_id", unique=True)
+        await db.curriculum_lessons.create_index([("cefr_level", 1), ("order", 1)])
         # exercises
         await db.exercises.create_index([("lesson_id", 1), ("skill", 1)])
         # attempts
@@ -93,15 +103,16 @@ async def init_db_indexes():
         logger.warning(f"Error initializing indexes: {e}")
 
 async def hide_legacy_demo_records():
-    """Label legacy demo records without deleting any existing data."""
+    """Label known legacy records and assign unowned records to this single-user app owner."""
     try:
         db = get_db()
-        legacy_titles = [
-            "A1 Begrüßungen und Vorstellungen (Greetings Guide)",
-            "Deutsche Artikel im Alltag (Articles in Daily Life)",
-            "Im Café bestellen (Ordering in a German Café)",
-        ]
-        await db.materials.update_many({"title": {"$in": legacy_titles}}, {"$set": {"is_seeded": True}})
+        # There is no authentication or multi-user model. Preserve existing unseeded
+        # material records as the single learner's collection, and mark ownership.
+        # Never classify or delete a material based on its title.
+        await db.materials.update_many(
+            {"user_id": {"$exists": False}, "is_seeded": {"$ne": True}},
+            {"$set": {"user_id": "default"}},
+        )
         # Earlier speaking sessions recorded a fixed score and fixed duration instead
         # of an evaluated result. Keep those records in MongoDB, but exclude them from
         # real learner metrics.
@@ -121,9 +132,62 @@ async def hide_legacy_demo_records():
     except Exception as e:
         logger.warning(f"Could not label legacy demo records: {e}")
 
+async def mark_interrupted_material_processing():
+    """Make interrupted background jobs visibly retryable after an app restart."""
+    try:
+        await get_db().materials.update_many(
+            {"user_id": "default", "processing_status": {"$in": ["extracting", "indexing", "analyzing", "generating_notes", "generating_questions"]}},
+            {"$set": {
+                "processing_status": "failed",
+                "processing_error": "Processing was interrupted by an application restart. Retry to continue.",
+            }},
+        )
+    except Exception as e:
+        logger.warning("Could not recover interrupted material processing: %s", e)
+
 async def seed_initial_data_if_empty():
-    """Kept for compatibility; user data must only be created by explicit user actions."""
-    return
+    """Idempotently import authored curriculum without touching learner progress."""
+    try:
+        from app.data.curriculum_manifest import get_curriculum_manifest
+        db = get_db()
+        manifest = get_curriculum_manifest()
+        for collection_name, key, records in (
+            ("curriculum_modules", "module_id", manifest["modules"]),
+            ("curriculum_topics", "topic_id", manifest["topics"]),
+            ("curriculum_lessons", "lesson_id", manifest["lessons"]),
+        ):
+            collection = db[collection_name]
+            for record in records:
+                current = await collection.find_one({key: record[key]})
+                if current and current.get("is_manually_edited"):
+                    # Keep edited curriculum bodies and metadata intact.
+                    continue
+                await collection.update_one(
+                    {key: record[key]}, {"$set": record}, upsert=True
+                )
+        # Keep old authored records out of the active catalog when a curriculum
+        # revision moves or retires a topic. Archive them instead of deleting
+        # them so any historical progress references remain intact.
+        for collection_name, key, records in (
+            ("curriculum_modules", "module_id", manifest["modules"]),
+            ("curriculum_topics", "topic_id", manifest["topics"]),
+            ("curriculum_lessons", "lesson_id", manifest["lessons"]),
+        ):
+            active_ids = [record[key] for record in records]
+            await db[collection_name].update_many(
+                {
+                    "content_source": "manifest",
+                    "is_manually_edited": {"$ne": True},
+                    key: {"$nin": active_ids},
+                },
+                {"$set": {"publication_status": "archived"}},
+            )
+        logger.info(
+            "Curriculum imported: %s modules, %s topics, %s lessons.",
+            len(manifest["modules"]), len(manifest["topics"]), len(manifest["lessons"]),
+        )
+    except Exception as e:
+        logger.exception("Could not seed authored curriculum: %s", e)
 
 async def seed_practice_data_if_empty():
     """Seeds starter reading, listening, writing, and speaking exercises if empty."""

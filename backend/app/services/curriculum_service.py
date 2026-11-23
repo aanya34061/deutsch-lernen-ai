@@ -1,18 +1,36 @@
 import logging
 from typing import Optional, List, Dict, Any
 from bson import ObjectId
-from app.data.curriculum_a1 import A1_LESSONS
-from app.data.curriculum_a2 import A2_LESSONS
-from app.data.curriculum_b1 import B1_LESSONS
+from app.data.curriculum_manifest import get_curriculum_manifest
 from app.database import get_db
 
 logger = logging.getLogger("german_app.curriculum")
 
-# Static catalogue lookup
-ALL_STATIC_LESSONS: List[Dict[str, Any]] = [*A1_LESSONS, *A2_LESSONS, *B1_LESSONS]
+# Static fallback and exercise lookup are derived from the same canonical manifest.
+_MANIFEST = get_curriculum_manifest()
+ALL_STATIC_LESSONS: List[Dict[str, Any]] = _MANIFEST["lessons"]
 STATIC_LESSONS_BY_ID = {l["id"]: l for l in ALL_STATIC_LESSONS}
 
 class CurriculumService:
+    @staticmethod
+    async def list_modules(level: Optional[str] = None) -> List[Dict[str, Any]]:
+        db = get_db()
+        query = {"publication_status": "published"}
+        if level:
+            query["level"] = level.upper()
+        modules = await db.curriculum_modules.find(query).sort([("level", 1), ("order", 1)]).to_list(length=100)
+        if not modules:
+            modules = [m for m in _MANIFEST["modules"] if not level or m["level"] == level.upper()]
+        result = []
+        for module in modules:
+            module = {key: value for key, value in module.items() if key != "_id"}
+            topics = await db.curriculum_topics.find({"module_id": module["module_id"], "publication_status": "published"}).sort("order", 1).to_list(length=100)
+            if not topics:
+                topics = [t for t in _MANIFEST["topics"] if t["module_id"] == module["module_id"]]
+            topics = [{key: value for key, value in item.items() if key != "_id"} for item in topics]
+            result.append({**module, "topics": topics})
+        return result
+
     @staticmethod
     async def get_user_completed_lesson_ids(user_id: Optional[str] = None) -> set:
         """Returns set of completed lesson IDs for learner."""
@@ -29,38 +47,43 @@ class CurriculumService:
         completed_ids = await CurriculumService.get_user_completed_lesson_ids()
         lessons_list = []
 
-        # 1. Built-in curriculum
-        for l in ALL_STATIC_LESSONS:
-            if level and l["cefr_level"].upper() != level.upper():
-                continue
-            if topic and topic.lower() not in l["topic"].lower():
-                continue
-
-            summary = {
-                "id": l["id"],
-                "title": l["title"],
-                "cefr_level": l["cefr_level"],
-                "module_title": l["module_title"],
-                "topic": l["topic"],
-                "order": l["order"],
-                "estimated_minutes": l.get("estimated_minutes", 15),
-                "objectives": l.get("objectives", []),
-                "is_completed": l["id"] in completed_ids,
-                "exercises_count": len(l.get("exercises", [])),
-                "source_material_id": l.get("source_material_id")
-            }
-            lessons_list.append(summary)
-
-        # 2. Dynamic lessons created from user materials in MongoDB
         db = get_db()
-        query = {}
+        query: Dict[str, Any] = {"publication_status": "published"}
         if level:
             query["cefr_level"] = level.upper()
         if topic:
             query["topic"] = {"$regex": topic, "$options": "i"}
+        curriculum = await db.curriculum_lessons.find(query).sort([("order", 1), ("lesson_id", 1)]).to_list(length=1000)
+        if not curriculum:
+            curriculum = [
+                lesson for lesson in ALL_STATIC_LESSONS
+                if (not level or lesson["cefr_level"].upper() == level.upper())
+                and (not topic or topic.lower() in lesson["topic"].lower())
+                and lesson.get("publication_status") == "published"
+            ]
+        for l in curriculum:
+            lesson_id = str(l.get("lesson_id") or l.get("id"))
+            lessons_list.append({
+                "id": lesson_id, "lesson_id": lesson_id, "module_id": l.get("module_id"),
+                "topic_id": l.get("topic_id"), "title": l["title"],
+                "cefr_level": l["cefr_level"], "module_title": l["module_title"],
+                "topic": l["topic"], "order": l["order"],
+                "estimated_minutes": l.get("estimated_minutes", 20),
+                "objectives": l.get("objectives", []),
+                "publication_status": l.get("publication_status", "draft"),
+                "is_completed": lesson_id in completed_ids,
+                "exercises_count": len(l.get("exercises", [])),
+                "source_material_id": l.get("source_material_id"),
+            })
 
-        cursor = db.lessons.find(query).sort("order", 1)
-        async for doc in cursor:
+        # User-created lessons based on personal Library material stay separate.
+        custom_query: Dict[str, Any] = {}
+        if level:
+            custom_query["cefr_level"] = level.upper()
+        if topic:
+            custom_query["topic"] = {"$regex": topic, "$options": "i"}
+        cursor = db.lessons.find(custom_query).sort("order", 1)
+        for doc in await cursor.to_list(length=1000):
             doc_id = str(doc.get("_id"))
             summary = {
                 "id": doc_id,
@@ -84,9 +107,12 @@ class CurriculumService:
         """Retrieves full lesson content by ID."""
         completed_ids = await CurriculumService.get_user_completed_lesson_ids()
 
-        # Check static catalog first
-        if lesson_id in STATIC_LESSONS_BY_ID:
+        db = get_db()
+        # Database is the served source; manifest remains a recovery fallback.
+        lesson = await db.curriculum_lessons.find_one({"lesson_id": lesson_id, "publication_status": "published"})
+        if not lesson and lesson_id in STATIC_LESSONS_BY_ID:
             lesson = dict(STATIC_LESSONS_BY_ID[lesson_id])
+        if lesson:
             lesson["is_completed"] = lesson_id in completed_ids
             raw_ex = lesson.get("exercises", [])
             lesson["exercises_count"] = len(raw_ex)
@@ -101,8 +127,7 @@ class CurriculumService:
             lesson["exercises"] = learner_ex
             return lesson
 
-        # Otherwise check MongoDB
-        db = get_db()
+        # Otherwise check user-created Library lessons.
         query = {"_id": ObjectId(lesson_id)} if ObjectId.is_valid(lesson_id) else {"id": lesson_id}
         doc = await db.lessons.find_one(query)
         if doc:
@@ -127,7 +152,13 @@ class CurriculumService:
     async def mark_lesson_completed(lesson_id: str) -> bool:
         """Marks a lesson as completed in learner progress."""
         db = get_db()
-        if lesson_id not in STATIC_LESSONS_BY_ID and not await db.lessons.find_one({"_id": ObjectId(lesson_id)} if ObjectId.is_valid(lesson_id) else {"id": lesson_id}):
+        curriculum_collection = getattr(db, "curriculum_lessons", None)
+        curriculum_doc = await curriculum_collection.find_one({"lesson_id": lesson_id, "publication_status": "published"}) if curriculum_collection is not None else None
+        custom_collection = getattr(db, "lessons", None)
+        custom_doc = None
+        if not curriculum_doc and lesson_id not in STATIC_LESSONS_BY_ID and custom_collection is not None:
+            custom_doc = await custom_collection.find_one({"_id": ObjectId(lesson_id)} if ObjectId.is_valid(lesson_id) else {"id": lesson_id})
+        if not curriculum_doc and not custom_doc and lesson_id not in STATIC_LESSONS_BY_ID:
             return False
         await db.progress.update_one(
             {"user_id": "default", "is_seeded": False},

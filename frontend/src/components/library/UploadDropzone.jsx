@@ -5,10 +5,8 @@ const SUPPORTED_EXTENSIONS = ['.pdf', '.docx', '.txt', '.jpg', '.jpeg', '.png'];
 const MAX_FILE_SIZE_MB = 25;
 const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
 
-export default function UploadDropzone({ currentLevel, onUploadSuccess, onError }) {
-  const [file, setFile] = useState(null);
-  const [level, setLevel] = useState(currentLevel || 'A1');
-  const [topic, setTopic] = useState('General');
+export default function UploadDropzone({ onUploadSuccess, onError }) {
+  const [files, setFiles] = useState([]);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [dragActive, setDragActive] = useState(false);
@@ -32,6 +30,29 @@ export default function UploadDropzone({ currentLevel, onUploadSuccess, onError 
     return true;
   };
 
+  const addFiles = (incomingFiles) => {
+    const selected = Array.from(incomingFiles || []);
+    if (!selected.length) return;
+
+    const validFiles = selected.filter(validateFile);
+    const combined = [...files, ...validFiles];
+    const uniqueFiles = combined.filter((item, index, all) =>
+      all.findIndex((candidate) => candidate.name === item.name && candidate.size === item.size && candidate.lastModified === item.lastModified) === index
+    );
+
+    if (uniqueFiles.length > 1 && uniqueFiles.some((item) => !/\.(jpe?g|png)$/i.test(item.name))) {
+      onError('Select multiple pictures together, or upload a single PDF, DOCX, or TXT file.');
+      return;
+    }
+    setFiles(uniqueFiles);
+    const previousAutoTitle = files.length === 1 ? files[0].name.replace(/\.[^/.]+$/, '') : '';
+    if (uniqueFiles.length > 1 && title && title === previousAutoTitle) {
+      setTitle('');
+    } else if (!title && uniqueFiles.length === 1) {
+      setTitle(uniqueFiles[0].name.replace(/\.[^/.]+$/, ''));
+    }
+  };
+
   const handleDrag = (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -46,31 +67,16 @@ export default function UploadDropzone({ currentLevel, onUploadSuccess, onError 
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      const droppedFile = e.dataTransfer.files[0];
-      if (validateFile(droppedFile)) {
-        setFile(droppedFile);
-        if (!title) {
-          setTitle(droppedFile.name.replace(/\.[^/.]+$/, ''));
-        }
-      }
-    }
+    addFiles(e.dataTransfer.files);
   };
 
   const handleFileChange = (e) => {
-    if (e.target.files && e.target.files[0]) {
-      const picked = e.target.files[0];
-      if (validateFile(picked)) {
-        setFile(picked);
-        if (!title) {
-          setTitle(picked.name.replace(/\.[^/.]+$/, ''));
-        }
-      }
-    }
+    addFiles(e.target.files);
+    e.target.value = '';
   };
 
   const handleReset = () => {
-    setFile(null);
+    setFiles([]);
     setTitle('');
     setDescription('');
     setProgress(0);
@@ -80,31 +86,49 @@ export default function UploadDropzone({ currentLevel, onUploadSuccess, onError 
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!file) {
-      onError('Please choose or drop a file first.');
+    if (!files.length) {
+      onError('Please choose or drop at least one file first.');
       return;
     }
 
     setUploading(true);
     setProgress(5);
+    const uploadedMaterials = [];
+    const failedUploads = [];
 
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('cefr_level', level);
-    formData.append('topic', topic);
-    if (title.trim()) formData.append('title', title.trim());
-    if (description.trim()) formData.append('description', description.trim());
+    for (const [index, selectedFile] of files.entries()) {
+      const formData = new FormData();
+      formData.append('file', selectedFile);
+      const baseTitle = title.trim();
+      const fileTitle = selectedFile.name.replace(/\.[^/.]+$/, '');
+      if (baseTitle) formData.append('title', files.length > 1 ? `${baseTitle} — ${fileTitle}` : baseTitle);
+      if (description.trim()) formData.append('description', description.trim());
 
-    try {
-      const res = await uploadMaterial(formData, (percent) => {
-        setProgress(percent);
-      });
-      handleReset();
-      onUploadSuccess(res);
-    } catch (err) {
-      console.error('Upload failed:', err);
-      onError(err.response?.data?.detail || err.message || 'File upload failed');
+      try {
+        const result = await uploadMaterial(formData, (percent) => {
+          setProgress(Math.round(((index + percent / 100) / files.length) * 100));
+        });
+        uploadedMaterials.push(result);
+        setProgress(Math.round(((index + 1) / files.length) * 100));
+      } catch (err) {
+        console.error(`Upload failed for ${selectedFile.name}:`, err);
+        failedUploads.push({ file: selectedFile, message: err.response?.data?.detail || err.message || 'Upload failed.' });
+      }
+    }
+    setProgress(100);
+
+    if (uploadedMaterials.length) {
+      onUploadSuccess(uploadedMaterials, failedUploads.map(({ file, message }) => `${file.name}: ${message}`));
+    }
+    if (failedUploads.length) {
       setUploading(false);
+      setFiles(failedUploads.map(({ file }) => file));
+      onError(`Uploaded ${uploadedMaterials.length} of ${files.length} files. Failed: ${failedUploads.map(({ file }) => file.name).join(', ')}. You can retry the remaining files.`);
+    } else if (uploadedMaterials.some((material) => material.status === 'failed')) {
+      setUploading(false);
+      onError('The pictures were uploaded, but some could not be processed. Retry processing from the library.');
+    } else {
+      handleReset();
     }
   };
 
@@ -113,10 +137,10 @@ export default function UploadDropzone({ currentLevel, onUploadSuccess, onError 
       <div className="card-body p-4">
         <h5 className="card-title fw-bold mb-3 d-flex align-items-center gap-2">
           <i className="bi bi-cloud-arrow-up-fill text-primary"></i>
-          Upload German Study Materials
+          Upload a file
         </h5>
         <p className="text-muted small mb-4">
-          Upload PDF textbooks, DOCX notes, TXT vocab lists, or handwritten note images (.png, .jpg).
+          Upload one PDF, DOCX, or TXT file, or select several handwritten note pictures (.png, .jpg) together.
         </p>
 
         <form onSubmit={handleSubmit}>
@@ -134,22 +158,41 @@ export default function UploadDropzone({ currentLevel, onUploadSuccess, onError 
               type="file"
               className="d-none"
               accept=".pdf,.docx,.txt,.jpg,.jpeg,.png"
+              multiple
+              onClick={(event) => event.stopPropagation()}
               onChange={handleFileChange}
               disabled={uploading}
             />
             <i className="bi bi-file-earmark-arrow-up dropzone-icon d-block"></i>
-            {file ? (
+            {files.length ? (
               <div>
-                <strong className="text-primary d-block fs-6">{file.name}</strong>
-                <span className="badge bg-secondary-subtle text-dark mt-1">
-                  {(file.size / (1024 * 1024)).toFixed(2)} MB
-                </span>
-                <p className="text-muted small mt-2 mb-0">Click or drop another file to replace</p>
+                <strong className="text-primary d-block fs-6">{files.length} file{files.length === 1 ? '' : 's'} selected</strong>
+                <ul className="list-unstyled small mt-2 mb-0">
+                  {files.map((selectedFile, index) => (
+                    <li key={`${selectedFile.name}-${selectedFile.lastModified}`} className="d-flex align-items-center justify-content-center gap-2">
+                      <span>{selectedFile.name} ({(selectedFile.size / (1024 * 1024)).toFixed(2)} MB)</span>
+                      {!uploading && (
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-link text-danger p-0"
+                          aria-label={`Remove ${selectedFile.name}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setFiles((current) => current.filter((_, fileIndex) => fileIndex !== index));
+                          }}
+                        >
+                          <i className="bi bi-x-circle" />
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+                {!uploading && <p className="text-muted small mt-2 mb-0">Click or drop more files to add them</p>}
               </div>
             ) : (
               <div>
                 <span className="fw-semibold text-dark d-block">
-                  Drag and drop your German file here
+                  Drag and drop German files or pictures here
                 </span>
                 <span className="text-muted small">or click to browse your computer</span>
                 <div className="mt-2">
@@ -157,50 +200,15 @@ export default function UploadDropzone({ currentLevel, onUploadSuccess, onError 
                   <span className="badge bg-light text-muted border me-1">DOCX</span>
                   <span className="badge bg-light text-muted border me-1">TXT</span>
                   <span className="badge bg-light text-muted border me-1">PNG / JPG</span>
-                  <span className="text-muted small ms-1">(Max {MAX_FILE_SIZE_MB}MB)</span>
+                  <span className="text-muted small ms-1">(Max {MAX_FILE_SIZE_MB}MB each; multi-select is for pictures)</span>
                 </div>
               </div>
             )}
           </div>
 
-          {/* Form Options */}
           <div className="row g-3">
-            <div className="col-md-3">
-              <label className="form-label small fw-semibold">Target Level</label>
-              <select
-                className="form-select form-select-sm"
-                value={level}
-                onChange={(e) => setLevel(e.target.value)}
-                disabled={uploading}
-              >
-                {['A1', 'A2', 'B1', 'B2', 'C1', 'C2'].map((lvl) => (
-                  <option key={lvl} value={lvl}>
-                    {lvl} {lvl === currentLevel ? '(Active)' : ''}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="col-md-3">
-              <label className="form-label small fw-semibold">Topic / Skill</label>
-              <select
-                className="form-select form-select-sm"
-                value={topic}
-                onChange={(e) => setTopic(e.target.value)}
-                disabled={uploading}
-              >
-                <option value="General">General / Overview</option>
-                <option value="Grammar">Grammar (Grammatik)</option>
-                <option value="Vocabulary">Vocabulary (Wortschatz)</option>
-                <option value="Lesen">Lesen (Reading)</option>
-                <option value="Hören">Hören (Listening)</option>
-                <option value="Schreiben">Schreiben (Writing)</option>
-                <option value="Sprechen">Sprechen (Speaking)</option>
-              </select>
-            </div>
-
-            <div className="col-md-6">
-              <label className="form-label small fw-semibold">Title (Optional)</label>
+            <div className="col-12">
+              <label className="form-label small fw-semibold">Title or title prefix (Optional)</label>
               <input
                 type="text"
                 className="form-control form-control-sm"
@@ -243,7 +251,7 @@ export default function UploadDropzone({ currentLevel, onUploadSuccess, onError 
 
           {/* Submit Actions */}
           <div className="d-flex justify-content-end gap-2 mt-3">
-            {file && !uploading && (
+            {files.length > 0 && !uploading && (
               <button
                 type="button"
                 className="btn btn-sm btn-outline-secondary"
@@ -255,7 +263,7 @@ export default function UploadDropzone({ currentLevel, onUploadSuccess, onError 
             <button
               type="submit"
               className="btn btn-sm btn-primary px-3"
-              disabled={!file || uploading}
+              disabled={!files.length || uploading}
             >
               {uploading ? (
                 <>
@@ -265,7 +273,7 @@ export default function UploadDropzone({ currentLevel, onUploadSuccess, onError 
               ) : (
                 <>
                   <i className="bi bi-upload me-1"></i>
-                  Upload & Extract
+                  Upload {files.length > 1 ? `${files.length} Pictures` : '& Extract'}
                 </>
               )}
             </button>

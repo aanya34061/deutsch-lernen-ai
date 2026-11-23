@@ -9,6 +9,11 @@ from app.services.curriculum_service import CurriculumService
 
 router = APIRouter(prefix="/lessons", tags=["German Lessons & Curriculum"])
 
+@router.get("/modules")
+async def list_curriculum_modules(level: Optional[str] = Query(None, description="Optional CEFR level: A1, A2, B1")):
+    """Return published modules and their topic-to-lesson links from the manifest import."""
+    return await CurriculumService.list_modules(level=level)
+
 @router.get("", response_model=List[LessonSummary])
 async def list_lessons(
     level: Optional[str] = Query(None, description="Filter by CEFR level: A1, A2, B1"),

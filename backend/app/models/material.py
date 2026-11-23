@@ -1,11 +1,12 @@
 from pydantic import BaseModel, Field, ConfigDict, model_validator, computed_field
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 
 # Supported material classifications
-SUPPORTED_CEFR_LEVELS = ["A1", "A2", "B1", "B2", "C1", "C2"]
+SUPPORTED_CEFR_LEVELS = ["A1", "A2", "B1", "B2", "C1", "C2", "Unknown"]
 SUPPORTED_TOPICS = ["Grammar", "Vocabulary", "Lesen", "Hören", "Schreiben", "Sprechen", "General"]
 SUPPORTED_FILE_TYPES = ["pdf", "docx", "txt", "image", "youtube", "link", "audio"]
 SUPPORTED_STATUSES = ["uploaded", "processing", "ready", "failed"]
+SUPPORTED_PROCESSING_STATUSES = ["uploaded", "extracting", "indexing", "analyzing", "generating_notes", "generating_questions", "ready", "failed"]
 SUPPORTED_INDEXING_STATUSES = ["not_indexed", "indexing", "indexed", "failed"]
 
 class MaterialBase(BaseModel):
@@ -13,7 +14,7 @@ class MaterialBase(BaseModel):
     file_type: str = "pdf"  # pdf, docx, txt, image, audio, youtube, link
     source_type: str = "upload"  # upload, link
     source_url: Optional[str] = None
-    cefr_level: str = "A1"
+    cefr_level: str = "Unknown"
     topic: str = "General"
     status: str = "ready"  # uploaded, processing, ready, failed
     error_message: Optional[str] = None
@@ -31,6 +32,11 @@ class MaterialBase(BaseModel):
     indexing_error: Optional[str] = None
     content_hash: Optional[str] = None
     indexed_at: Optional[str] = None
+    processing_status: str = "uploaded"
+    processing_error: Optional[str] = None
+    analysis: Optional[Dict[str, Any]] = None
+    notes_count: int = 0
+    questions_count: int = 0
 
 class MaterialCreate(MaterialBase):
     pass
@@ -45,7 +51,7 @@ class MaterialUpdate(BaseModel):
 class LearningLinkCreate(BaseModel):
     url: str
     title: Optional[str] = None
-    cefr_level: str = "A1"
+    cefr_level: str = "Unknown"
     topic: str = "General"
     description: Optional[str] = None
 

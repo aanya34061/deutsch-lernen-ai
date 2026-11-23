@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 from pymongo.errors import PyMongoError
 from app.config import settings
 from app.database import connect_to_mongo, close_mongo_connection
-from app.routers import health, dashboard, levels, library, lessons, exercises, vocabulary, tutor, practice
+from app.routers import health, dashboard, levels, library, lessons, exercises, vocabulary, tutor, practice, study
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,6 +64,7 @@ app.include_router(exercises.router, prefix=API_V1_PREFIX)
 app.include_router(vocabulary.router, prefix=API_V1_PREFIX)
 app.include_router(tutor.router, prefix=API_V1_PREFIX)
 app.include_router(practice.router, prefix=API_V1_PREFIX)
+app.include_router(study.router, prefix=API_V1_PREFIX)
 
 @app.get("/")
 async def root():

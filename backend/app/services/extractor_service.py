@@ -22,19 +22,18 @@ class ExtractorService:
                     page_texts.append(f"--- Page {i+1} ---\n{text.strip()}")
             
             combined_text = "\n\n".join(page_texts).strip()
-            if not combined_text:
-                combined_text = "[Scanned or empty PDF: No embedded text found]"
             
             return {
                 "text": combined_text,
                 "pages": num_pages,
                 "has_text": bool(page_texts),
-                "summary": f"PDF document with {num_pages} pages."
+                "summary": f"PDF document with {num_pages} pages.",
+                "error": None if page_texts else "No embedded text found. The PDF may be scanned or empty."
             }
         except Exception as e:
             logger.error(f"Error extracting PDF {file_path}: {e}")
             return {
-                "text": f"[Error reading PDF: {str(e)}]",
+                "text": "",
                 "pages": 0,
                 "has_text": False,
                 "error": str(e)
@@ -56,19 +55,18 @@ class ExtractorService:
                         paragraphs.append(" | ".join(row_texts))
 
             combined_text = "\n\n".join(paragraphs).strip()
-            if not combined_text:
-                combined_text = "[Empty DOCX document: No text found]"
 
             return {
                 "text": combined_text,
                 "paragraphs_count": len(paragraphs),
                 "has_text": bool(paragraphs),
-                "summary": f"Word DOCX document with {len(paragraphs)} paragraphs/entries."
+                "summary": f"Word DOCX document with {len(paragraphs)} paragraphs/entries.",
+                "error": None if paragraphs else "No readable text found in the DOCX document."
             }
         except Exception as e:
             logger.error(f"Error extracting DOCX {file_path}: {e}")
             return {
-                "text": f"[Error reading DOCX: {str(e)}]",
+                "text": "",
                 "paragraphs_count": 0,
                 "has_text": False,
                 "error": str(e)
@@ -94,61 +92,100 @@ class ExtractorService:
         cleaned = content.strip()
         lines = [line for line in cleaned.splitlines() if line.strip()]
         return {
-            "text": cleaned if cleaned else "[Empty text file]",
+            "text": cleaned,
             "lines_count": len(lines),
             "has_text": bool(cleaned),
-            "summary": f"Text file with {len(lines)} lines."
+            "summary": f"Text file with {len(lines)} lines.",
+            "error": None if cleaned else "The text file is empty."
         }
 
     @staticmethod
     def extract_from_image(file_path: str) -> Dict[str, Any]:
-        """Extract text from JPG/PNG image using optional Tesseract OCR if installed."""
-        from PIL import Image
+        """Extract German and English text from supported images using local OCR."""
+        from PIL import Image, ImageEnhance, ImageOps
         try:
-            # Verify image file
             with Image.open(file_path) as img:
-                width, height = img.size
+                image = ImageOps.exif_transpose(img).convert("RGB")
+                width, height = image.size
                 format_name = img.format or "Image"
 
-            has_tesseract = shutil.which("tesseract") is not None
-            if has_tesseract:
-                try:
-                    import pytesseract
-                    # Attempt German + English OCR, fallback to default if lang not found
-                    try:
-                        extracted = pytesseract.image_to_string(Image.open(file_path), lang="deu+eng")
-                    except Exception:
-                        extracted = pytesseract.image_to_string(Image.open(file_path))
-                    
-                    cleaned = extracted.strip()
-                    return {
-                        "text": cleaned if cleaned else "[Image OCR produced no readable text]",
-                        "dimensions": f"{width}x{height}",
-                        "ocr_available": True,
-                        "has_text": bool(cleaned),
-                        "summary": f"{format_name} image ({width}x{height}) processed with Tesseract OCR."
-                    }
-                except Exception as ocr_err:
-                    logger.warning(f"OCR execution failed: {ocr_err}")
-                    return {
-                        "text": f"[OCR execution error: {str(ocr_err)}]",
-                        "dimensions": f"{width}x{height}",
-                        "ocr_available": True,
-                        "has_text": False,
-                        "summary": f"{format_name} image ({width}x{height})."
-                    }
-            else:
+            tesseract_path = shutil.which("tesseract")
+            if not tesseract_path:
                 return {
-                    "text": "[Image uploaded successfully. Note: OCR engine requires system Tesseract ('brew install tesseract tesseract-lang'). Original image is preserved and ready for Phase 3.]",
-                    "dimensions": f"{width}x{height}",
+                    "text": "",
                     "ocr_available": False,
                     "has_text": False,
+                    "error": "Tesseract OCR is not installed or is not available in the backend PATH.",
                     "summary": f"{format_name} image ({width}x{height}) stored. OCR setup optional."
+                }
+
+            try:
+                import pytesseract
+                pytesseract.pytesseract.tesseract_cmd = tesseract_path
+                available_languages = set(pytesseract.get_languages(config=""))
+                selected_languages = [lang for lang in ("deu", "eng") if lang in available_languages]
+                if not selected_languages:
+                    raise RuntimeError("Tesseract is installed, but neither German (deu) nor English (eng) language data is available.")
+
+                # Normalize camera orientation, small text, contrast, and sharpness.
+                if image.width < 1800:
+                    scale = 1800 / image.width
+                    image = image.resize((1800, max(1, round(image.height * scale))), Image.Resampling.LANCZOS)
+                image = ImageOps.grayscale(image)
+                image = ImageOps.autocontrast(image)
+                image = ImageEnhance.Contrast(image).enhance(1.25)
+                image = ImageEnhance.Sharpness(image).enhance(1.4)
+
+                lang = "+".join(selected_languages)
+                # Uploaded lesson photos vary between a single block, columns,
+                # and scattered labels. Try several Tesseract page layouts and
+                # retain the result with the strongest word confidence.
+                candidates = []
+                for psm in (6, 11, 4):
+                    for candidate_image in (image, ImageOps.autocontrast(image.point(lambda px: 255 if px > 170 else 0))):
+                        data = pytesseract.image_to_data(
+                            candidate_image,
+                            lang=lang,
+                            config=f"--oem 3 --psm {psm}",
+                            output_type=pytesseract.Output.DICT,
+                        )
+                        words = [word.strip() for word in data["text"] if word and word.strip()]
+                        confidences = [
+                            float(confidence)
+                            for word, confidence in zip(data["text"], data["conf"])
+                            if word and word.strip() and str(confidence).strip() not in ("", "-1")
+                        ]
+                        text = " ".join(words).strip()
+                        if text:
+                            # Confidence leads; a small length tie-breaker helps
+                            # preserve complete notes when confidence is similar.
+                            score = (sum(confidences) / max(1, len(confidences))) + min(len(text), 2000) / 2000
+                            candidates.append((score, text, psm))
+                _, cleaned, chosen_psm = max(candidates, default=(0, "", 6), key=lambda item: item[0])
+                return {
+                    "text": cleaned,
+                    "dimensions": f"{width}x{height}",
+                    "ocr_available": True,
+                    "ocr_languages": selected_languages,
+                    "ocr_page_segmentation": chosen_psm,
+                    "has_text": bool(cleaned),
+                    "summary": f"{format_name} image ({width}x{height}) processed with Tesseract OCR ({', '.join(selected_languages)}).",
+                    "error": None if cleaned else "OCR found no readable text. A sharper, well-lit image with printed text may help."
+                }
+            except Exception as ocr_err:
+                logger.warning("OCR execution failed for %s: %s", file_path, ocr_err)
+                return {
+                    "text": "",
+                    "dimensions": f"{width}x{height}",
+                    "ocr_available": True,
+                    "has_text": False,
+                    "error": str(ocr_err),
+                    "summary": f"{format_name} image ({width}x{height})."
                 }
         except Exception as e:
             logger.error(f"Error inspecting image {file_path}: {e}")
             return {
-                "text": f"[Invalid or unreadable image file: {str(e)}]",
+                "text": "",
                 "ocr_available": False,
                 "has_text": False,
                 "error": str(e)
@@ -229,17 +266,15 @@ class ExtractorService:
             logger.info(f"YouTube transcript unavailable for {video_id}: {transcript_err}")
 
         if not transcript_text:
-            transcript_text = (
-                "[YouTube link saved. Automatic captions are disabled, unavailable, "
-                "or access-restricted for this video. The URL is preserved for learning.]"
-            )
+            transcript_text = ""
 
         return {
             "title": title or f"YouTube Video ({video_id})",
             "video_id": video_id,
             "text": transcript_text,
             "has_text": has_transcript,
-            "summary": f"YouTube video: {title or video_id}"
+            "summary": f"YouTube video: {title or video_id}",
+            "error": None if has_transcript else "No accessible transcript was found for this video. The link is saved, but it is not available as AI study content."
         }
 
     @staticmethod
@@ -255,8 +290,9 @@ class ExtractorService:
                 if resp.status_code >= 400:
                     return {
                         "title": url,
-                        "text": f"[HTTP {resp.status_code}: Unable to load content from {url}]",
-                        "has_text": False
+                        "text": "",
+                        "has_text": False,
+                        "error": f"HTTP {resp.status_code}: Unable to load this page."
                     }
                 html = resp.text
 
@@ -275,7 +311,12 @@ class ExtractorService:
             extracted_text = "\n".join(lines)[:10000]  # cap at 10,000 characters
 
             if not extracted_text:
-                extracted_text = f"[Web link saved: {url}]"
+                return {
+                    "title": title,
+                    "text": "",
+                    "has_text": False,
+                    "error": "The page did not contain readable text."
+                }
 
             return {
                 "title": title,
@@ -287,7 +328,7 @@ class ExtractorService:
             logger.warning(f"Error fetching web URL {url}: {e}")
             return {
                 "title": url,
-                "text": f"[Web link saved: {url}. Could not fetch content automatically: {str(e)}]",
+                "text": "",
                 "has_text": False,
                 "error": str(e)
             }

@@ -1,498 +1,180 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { getMaterials, deleteMaterial } from '../services/api';
+import { getMaterials, getMaterialFileUrl, deleteMaterial, retryMaterialProcessing, updateMaterial } from '../services/api';
 import UploadDropzone from '../components/library/UploadDropzone';
 import AddLinkForm from '../components/library/AddLinkForm';
-import MaterialCard from '../components/library/MaterialCard';
-import MaterialTable from '../components/library/MaterialTable';
-import MaterialDetailModal from '../components/library/MaterialDetailModal';
-import EditMaterialModal from '../components/library/EditMaterialModal';
-import LoadingState from '../components/LoadingState';
-import AlertMessage from '../components/AlertMessage';
 
-export default function LibraryPage({ currentLevel, onRefreshDashboard }) {
+const readableDate = (value) => value ? new Date(value).toLocaleDateString() : 'Date unavailable';
+
+export default function LibraryPage({ onRefreshDashboard }) {
   const [materials, setMaterials] = useState([]);
-  const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [successMessage, setSuccessMessage] = useState(null);
+  const [error, setError] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [addMode, setAddMode] = useState('file');
+  const [deletingId, setDeletingId] = useState('');
+  const [retryingId, setRetryingId] = useState('');
 
-  // Filters
-  const [search, setSearch] = useState('');
-  const [levelFilter, setLevelFilter] = useState('');
-  const [topicFilter, setTopicFilter] = useState('');
-  const [typeFilter, setTypeFilter] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
-
-  // UI modes
-  const [activeTab, setActiveTab] = useState('list'); // 'list' | 'upload' | 'link'
-  const [displayMode, setDisplayMode] = useState('grid'); // 'grid' | 'table'
-
-  // Modal states
-  const [inspectMaterial, setInspectMaterial] = useState(null);
-  const [editMaterial, setEditMaterial] = useState(null);
-  const [deleteTarget, setDeleteTarget] = useState(null);
-  const [deleting, setDeleting] = useState(false);
-
-  // Fetch materials
-  const fetchLibrary = useCallback(async () => {
+  const refresh = useCallback(async () => {
     setLoading(true);
-    setError(null);
+    setError('');
     try {
-      const params = {};
-      if (search.trim()) params.search = search.trim();
-      if (levelFilter) params.level = levelFilter;
-      if (topicFilter) params.topic = topicFilter;
-      if (typeFilter) params.file_type = typeFilter;
-      if (statusFilter) params.status = statusFilter;
-
-      const data = await getMaterials(params);
-      setMaterials(data?.items || []);
-      setTotalCount(data?.total || 0);
+      const result = await getMaterials();
+      setMaterials(Array.isArray(result?.items) ? result.items : []);
     } catch (err) {
-      console.error('Failed to load study library:', err);
-      setError(err.response?.data?.detail || err.message || 'Failed to load materials from server.');
+      setError(err.response?.data?.detail || err.message || 'Could not load your library.');
     } finally {
       setLoading(false);
     }
-  }, [search, levelFilter, topicFilter, typeFilter, statusFilter]);
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
 
   useEffect(() => {
-    fetchLibrary();
-  }, [fetchLibrary]);
+    if (!materials.some((item) => !['ready', 'failed'].includes(item.processing_status))) return undefined;
+    const timer = window.setInterval(refresh, 4000);
+    return () => window.clearInterval(timer);
+  }, [materials, refresh]);
 
-  // Handle successful file upload
-  const handleUploadSuccess = async (newMaterial) => {
-    const statusMessage = newMaterial.status === 'ready'
-      ? `"${newMaterial.title || 'File'}" uploaded and text extracted.`
-      : `"${newMaterial.title || 'File'}" was uploaded, but processing ${newMaterial.status || 'status'} needs attention${newMaterial.error_message ? `: ${newMaterial.error_message}` : '.'}`;
-    setSuccessMessage(statusMessage);
-    setActiveTab('list');
-    await fetchLibrary();
+  const added = async (uploaded, failedUploads = []) => {
+    const newMaterials = Array.isArray(uploaded) ? uploaded : [uploaded];
+    if (!failedUploads.length && newMaterials.length && newMaterials.every((material) => material?.status !== 'failed')) setAdding(false);
+    await refresh();
+    const failed = newMaterials.filter((material) => material?.status === 'failed');
+    if (failedUploads.length || failed.length) {
+      const messages = [
+        ...failedUploads,
+        ...failed.map((material) => `${material.title || material.original_filename}: ${material.error_message || 'saved but could not be processed; you can retry from the library.'}`)
+      ];
+      setError(messages.join(' '));
+    }
     if (onRefreshDashboard) await onRefreshDashboard();
   };
 
-  // Handle successful link addition
-  const handleLinkSuccess = async (newMaterial) => {
-    setSuccessMessage(newMaterial.status === 'ready'
-      ? `Learning link "${newMaterial.title || 'Resource'}" added and processed.`
-      : `Learning link "${newMaterial.title || 'Resource'}" was saved, but processing ${newMaterial.status || 'status'} needs attention${newMaterial.error_message ? `: ${newMaterial.error_message}` : '.'}`);
-    setActiveTab('list');
-    await fetchLibrary();
-    if (onRefreshDashboard) await onRefreshDashboard();
-  };
-
-  // Handle edit update
-  const handleMaterialUpdated = async (updated) => {
-    setSuccessMessage(`"${updated.title}" updated successfully.`);
-    await fetchLibrary();
-    if (onRefreshDashboard) await onRefreshDashboard();
-  };
-
-  // Handle deletion
-  const confirmDelete = async () => {
-    if (!deleteTarget) return;
+  const remove = async (material) => {
+    if (!window.confirm(`Delete “${material.title || material.original_filename}”? This also removes the saved file.`)) return;
+    const id = material.id || material._id;
+    setDeletingId(id);
+    setError('');
     try {
-      setDeleting(true);
-      await deleteMaterial(deleteTarget.id || deleteTarget._id);
-      setSuccessMessage(`"${deleteTarget.title}" was deleted.`);
-      setDeleteTarget(null);
-      await fetchLibrary();
+      await deleteMaterial(id);
+      setMaterials((items) => items.filter((item) => (item.id || item._id) !== id));
       if (onRefreshDashboard) await onRefreshDashboard();
     } catch (err) {
-      console.error('Failed to delete material:', err);
-      setError(err.response?.data?.detail || err.message || 'Failed to delete material');
+      setError(err.response?.data?.detail || err.message || 'Could not delete this material.');
     } finally {
-      setDeleting(false);
+      setDeletingId('');
     }
   };
 
-  const hasActiveFilters = Boolean(search || levelFilter || topicFilter || typeFilter || statusFilter);
+  const retry = async (material) => {
+    const id = material.id || material._id;
+    setRetryingId(id);
+    setError('');
+    try {
+      await retryMaterialProcessing(id);
+      setMaterials((items) => items.map((item) => (item.id || item._id) === id ? { ...item, processing_status: 'indexing' } : item));
+      await refresh();
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message || 'Could not start processing.');
+    } finally {
+      setRetryingId('');
+    }
+  };
 
-  const resetFilters = () => {
-    setSearch('');
-    setLevelFilter('');
-    setTopicFilter('');
-    setTypeFilter('');
-    setStatusFilter('');
+  const correctLevel = async (material, cefr_level) => {
+    try {
+      await updateMaterial(material.id || material._id, { cefr_level });
+      await refresh();
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message || 'Could not update the level.');
+    }
   };
 
   return (
-    <div className="container-fluid p-0">
-      {/* Header */}
-      <div className="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+    <main className="container py-4">
+      <header className="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
         <div>
-          <h3 className="fw-bold mb-1">
-            <i className="bi bi-collection text-primary me-2"></i>
-            Study Library & Materials
-          </h3>
-          <p className="text-muted mb-0">
-            Upload German PDFs, DOCX, TXT notes, images, and YouTube learning links for your studies.
-          </p>
+          <h1 className="h3 fw-bold mb-1">My Library</h1>
+          <p className="text-muted mb-0">Your personal collection of German learning materials.</p>
         </div>
+        <button className="btn btn-primary" onClick={() => setAdding((value) => !value)}>
+          <i className={`bi ${adding ? 'bi-x-lg' : 'bi-plus-lg'} me-2`} />{adding ? 'Close' : 'Add Material'}
+        </button>
+      </header>
 
-        <div className="d-flex flex-wrap gap-2">
-          <button
-            type="button"
-            className={`btn btn-sm ${activeTab === 'upload' ? 'btn-primary' : 'btn-outline-primary'}`}
-            onClick={() => setActiveTab(activeTab === 'upload' ? 'list' : 'upload')}
-          >
-            <i className="bi bi-cloud-arrow-up-fill me-1"></i>
-            {activeTab === 'upload' ? 'Close Upload' : 'Upload File'}
-          </button>
+      {error && <div className="alert alert-danger d-flex justify-content-between align-items-center" role="alert">
+        <span>{error}</span><button className="btn btn-sm btn-outline-danger" onClick={refresh}>Retry</button>
+      </div>}
 
-          <button
-            type="button"
-            className={`btn btn-sm ${activeTab === 'link' ? 'btn-danger' : 'btn-outline-danger'}`}
-            onClick={() => setActiveTab(activeTab === 'link' ? 'list' : 'link')}
-          >
-            <i className="bi bi-link-45deg me-1"></i>
-            {activeTab === 'link' ? 'Close Link' : 'Add Link / YouTube'}
-          </button>
-
-          <button
-            type="button"
-            className="btn btn-sm btn-outline-secondary"
-            onClick={fetchLibrary}
-            title="Refresh library list"
-          >
-            <i className="bi bi-arrow-clockwise"></i> Refresh
-          </button>
-
-          <Link to="/" className="btn btn-sm btn-outline-secondary">
-            <i className="bi bi-arrow-left me-1"></i> Dashboard
-          </Link>
-        </div>
-      </div>
-
-      {/* Notifications */}
-      {successMessage && (
-        <AlertMessage
-          type="success"
-          message={successMessage}
-          dismissible
-          onDismiss={() => setSuccessMessage(null)}
-        />
-      )}
-
-      {error && (
-        <AlertMessage
-          type="danger"
-          title="Error"
-          message={error}
-          onRetry={fetchLibrary}
-          dismissible
-          onDismiss={() => setError(null)}
-        />
-      )}
-
-      {/* Collapsible Action Panels */}
-      {activeTab === 'upload' && (
-        <UploadDropzone
-          currentLevel={currentLevel}
-          onUploadSuccess={handleUploadSuccess}
-          onError={(msg) => setError(msg)}
-        />
-      )}
-
-      {activeTab === 'link' && (
-        <AddLinkForm
-          currentLevel={currentLevel}
-          onLinkAdded={handleLinkSuccess}
-          onError={(msg) => setError(msg)}
-        />
-      )}
-
-      {/* Filter and Search Bar Card */}
-      <div className="card shadow-sm border-0 mb-4 bg-white">
-        <div className="card-body p-3">
-          <div className="row g-2 align-items-center">
-            {/* Search Input */}
-            <div className="col-lg-4 col-md-6">
-              <div className="input-group input-group-sm">
-                <span className="input-group-text bg-light text-muted border-end-0">
-                  <i className="bi bi-search"></i>
-                </span>
-                <input
-                  type="text"
-                  className="form-control border-start-0"
-                  placeholder="Search materials by title or keywords..."
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                />
-                {search && (
-                  <button
-                    className="btn btn-outline-secondary"
-                    type="button"
-                    onClick={() => setSearch('')}
-                  >
-                    <i className="bi bi-x"></i>
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Level Filter */}
-            <div className="col-lg-2 col-md-3 col-6">
-              <select
-                className="form-select form-select-sm"
-                value={levelFilter}
-                onChange={(e) => setLevelFilter(e.target.value)}
-              >
-                <option value="">All Levels (A1-C2)</option>
-                {['A1', 'A2', 'B1', 'B2', 'C1', 'C2'].map((lvl) => (
-                  <option key={lvl} value={lvl}>
-                    Level {lvl}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Topic Filter */}
-            <div className="col-lg-2 col-md-3 col-6">
-              <select
-                className="form-select form-select-sm"
-                value={topicFilter}
-                onChange={(e) => setTopicFilter(e.target.value)}
-              >
-                <option value="">All Topics</option>
-                <option value="Grammar">Grammar</option>
-                <option value="Vocabulary">Vocabulary</option>
-                <option value="Lesen">Lesen (Reading)</option>
-                <option value="Hören">Hören (Listening)</option>
-                <option value="Schreiben">Schreiben (Writing)</option>
-                <option value="Sprechen">Sprechen (Speaking)</option>
-                <option value="General">General</option>
-              </select>
-            </div>
-
-            {/* Type Filter */}
-            <div className="col-lg-2 col-md-4 col-6">
-              <select
-                className="form-select form-select-sm"
-                value={typeFilter}
-                onChange={(e) => setTypeFilter(e.target.value)}
-              >
-                <option value="">All Formats</option>
-                <option value="pdf">PDF Document</option>
-                <option value="docx">Word (.docx)</option>
-                <option value="txt">Text (.txt)</option>
-                <option value="image">Image / Notes</option>
-                <option value="youtube">YouTube Video</option>
-                <option value="link">Web Article / URL</option>
-              </select>
-            </div>
-
-            {/* Status Filter */}
-            <div className="col-lg-1 col-md-4 col-6">
-              <select
-                className="form-select form-select-sm"
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-              >
-                <option value="">Status</option>
-                <option value="ready">Ready</option>
-                <option value="processing">Processing</option>
-                <option value="uploaded">Uploaded</option>
-                <option value="failed">Failed</option>
-              </select>
-            </div>
-
-            {/* View Mode Toggle & Reset */}
-            <div className="col-lg-1 col-md-4 d-flex justify-content-end gap-1">
-              {hasActiveFilters && (
-                <button
-                  type="button"
-                  className="btn btn-sm btn-outline-secondary"
-                  onClick={resetFilters}
-                  title="Reset all filters"
-                >
-                  <i className="bi bi-x-circle"></i>
-                </button>
-              )}
-              <div className="btn-group btn-group-sm">
-                <button
-                  type="button"
-                  className={`btn ${displayMode === 'grid' ? 'btn-primary' : 'btn-outline-secondary'}`}
-                  onClick={() => setDisplayMode('grid')}
-                  title="Card Grid View"
-                >
-                  <i className="bi bi-grid-fill"></i>
-                </button>
-                <button
-                  type="button"
-                  className={`btn ${displayMode === 'table' ? 'btn-primary' : 'btn-outline-secondary'}`}
-                  onClick={() => setDisplayMode('table')}
-                  title="Table / List View"
-                >
-                  <i className="bi bi-list-ul"></i>
-                </button>
-              </div>
-            </div>
+      {adding && <section className="card border-0 shadow-sm mb-4">
+        <div className="card-body">
+          <div className="btn-group mb-3" role="group" aria-label="Material type">
+            <button className={`btn ${addMode === 'file' ? 'btn-primary' : 'btn-outline-primary'}`} onClick={() => setAddMode('file')}>Upload a file</button>
+            <button className={`btn ${addMode === 'link' ? 'btn-primary' : 'btn-outline-primary'}`} onClick={() => setAddMode('link')}>Add a URL</button>
           </div>
+          {addMode === 'file'
+            ? <UploadDropzone onUploadSuccess={added} onError={setError} />
+            : <AddLinkForm onLinkAdded={added} onError={setError} />}
         </div>
-      </div>
+      </section>}
 
-      {/* Material Count Header */}
-      <div className="d-flex justify-content-between align-items-center mb-3">
-        <span className="small text-muted fw-semibold">
-          {loading ? (
-            'Loading library...'
-          ) : (
-            `Showing ${materials.length} of ${totalCount} study material${totalCount === 1 ? '' : 's'}`
-          )}
-        </span>
-        {hasActiveFilters && (
-          <span className="badge bg-light text-primary border">
-            Filters active
-          </span>
-        )}
-      </div>
-
-      {/* Main Content Area */}
-      {loading ? (
-        <LoadingState message="Fetching German study materials and extracted notes..." />
-      ) : materials.length === 0 ? (
-        <div className="card shadow-sm border-0 p-5 text-center bg-white rounded-3">
-          <div className="py-4">
-            <i className="bi bi-journal-album display-4 text-muted mb-3 d-block"></i>
-            {hasActiveFilters ? (
-              <>
-                <h5 className="fw-bold text-dark">No matching materials found</h5>
-                <p className="text-muted small mb-3">
-                  No study materials match your current search and filter settings.
-                </p>
-                <button type="button" className="btn btn-sm btn-outline-primary" onClick={resetFilters}>
-                  Clear all filters
-                </button>
-              </>
-            ) : (
-              <>
-                <h5 className="fw-bold text-dark">Your German Library is Empty</h5>
-                <p className="text-muted small mb-4" style={{ maxWidth: '480px', margin: '0 auto' }}>
-                  Upload your class notes, worksheets (PDF, Word, TXT, images) or paste a German YouTube link to start extracting vocab and grammar.
-                </p>
-                <div className="d-flex justify-content-center gap-2">
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-primary"
-                    onClick={() => setActiveTab('upload')}
-                  >
-                    <i className="bi bi-cloud-arrow-up-fill me-1"></i> Upload First File
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-outline-danger"
-                    onClick={() => setActiveTab('link')}
-                  >
-                    <i className="bi bi-link-45deg me-1"></i> Add YouTube Video
-                  </button>
-                </div>
-              </>
-            )}
+      <section aria-labelledby="materials-heading">
+        <div className="d-flex align-items-center justify-content-between mb-3">
+          <h2 id="materials-heading" className="h5 fw-bold mb-0">My Materials</h2>
+          {!loading && <button className="btn btn-sm btn-outline-secondary" onClick={refresh} aria-label="Refresh materials"><i className="bi bi-arrow-clockwise" /></button>}
+        </div>
+        {loading ? <p className="text-muted">Loading your materials…</p> : error ? null : materials.length === 0 ? (
+          <div className="text-center bg-light rounded-3 p-5">
+            <h3 className="h5 fw-bold">Your library is empty.</h3>
+            <p className="text-muted mb-3">Upload your German notes, documents, images, or add a learning link to get started.</p>
+            <button className="btn btn-primary" onClick={() => setAdding(true)}><i className="bi bi-plus-lg me-2" />Add Material</button>
           </div>
-        </div>
-      ) : displayMode === 'grid' ? (
-        <div className="row g-3">
-          {materials.map((material) => (
-            <div key={material.id || material._id} className="col-12 col-md-6 col-xl-4">
-              <MaterialCard
-                material={material}
-                onInspect={(m) => setInspectMaterial(m)}
-                onEdit={(m) => setEditMaterial(m)}
-                onDelete={(m) => setDeleteTarget(m)}
-              />
-            </div>
-          ))}
-        </div>
-      ) : (
-        <MaterialTable
-          materials={materials}
-          onInspect={(m) => setInspectMaterial(m)}
-          onEdit={(m) => setEditMaterial(m)}
-          onDelete={(m) => setDeleteTarget(m)}
-        />
-      )}
-
-      {/* Inspect / Extracted Text Modal */}
-      {inspectMaterial && (
-        <MaterialDetailModal
-          material={inspectMaterial}
-          onClose={() => setInspectMaterial(null)}
-        />
-      )}
-
-      {/* Edit Material Modal */}
-      {editMaterial && (
-        <EditMaterialModal
-          material={editMaterial}
-          onClose={() => setEditMaterial(null)}
-          onUpdated={handleMaterialUpdated}
-          onError={(msg) => setError(msg)}
-        />
-      )}
-
-      {/* Delete Confirmation Modal */}
-      {deleteTarget && (
-        <>
-          <div className="modal-backdrop-custom" onClick={() => !deleting && setDeleteTarget(null)}></div>
-          <div className="modal-custom d-flex align-items-center justify-content-center p-3" tabIndex="-1">
-            <div className="modal-dialog w-100" style={{ maxWidth: '450px' }}>
-              <div className="modal-content shadow-lg border-0 rounded-3">
-                <div className="modal-header bg-light py-3 border-bottom">
-                  <h5 className="modal-title fw-bold text-danger">
-                    <i className="bi bi-exclamation-triangle-fill me-2"></i>
-                    Confirm Delete
-                  </h5>
-                  <button
-                    type="button"
-                    className="btn-close"
-                    aria-label="Close"
-                    disabled={deleting}
-                    onClick={() => setDeleteTarget(null)}
-                  ></button>
-                </div>
-                <div className="modal-body p-4">
-                  <p className="mb-2">
-                    Are you sure you want to delete this study material?
-                  </p>
-                  <div className="p-2 bg-light rounded border text-dark fw-semibold small mb-2 text-truncate">
-                    {deleteTarget.title}
+        ) : <div className="list-group">
+          {materials.map((material) => {
+            const id = material.id || material._id;
+            const isLink = material.source_type === 'link';
+            const aiReady = material.indexing_status === 'indexed';
+            const name = material.title || material.original_filename || material.source_url || 'Untitled material';
+            return <article key={id} className="list-group-item py-3">
+              <div className="d-flex flex-wrap align-items-center justify-content-between gap-3">
+                <div className="d-flex align-items-start gap-3">
+                  <i className={`bi ${isLink ? 'bi-link-45deg' : 'bi-file-earmark-text'} fs-4 text-primary`} aria-hidden="true" />
+                  <div>
+                    <div className="fw-semibold">{name}</div>
+                    <div className="small text-muted">{(material.file_type || 'material').toUpperCase()} · Added {readableDate(material.created_at)}</div>
+                    {material.description && <div className="small mt-1">{material.description}</div>}
+                    <div className="small mt-1">
+                      Status: {material.processing_status === 'ready' ? 'Ready' : material.processing_status === 'failed' ? 'Processing failed' : (material.processing_status || 'Uploaded').replaceAll('_', ' ')}
+                      {material.processing_error && <span className="text-danger"> · {material.processing_error}</span>}
+                      {material.status === 'failed' && material.error_message && <span className="text-danger"> · {material.error_message}</span>}
+                      {!isLink && material.status !== 'failed' && <> · AI: {aiReady ? 'Ready' : material.indexing_status === 'failed' ? 'Unavailable' : 'Not ready'}</>}
+                      {material.indexing_status === 'failed' && material.indexing_error && <span className="text-danger"> · {material.indexing_error}</span>}
+                    </div>
+                    <label className="small text-muted mt-1">German level <select aria-label={`German level for ${name}`} className="form-select form-select-sm d-inline-block w-auto ms-1" value={material.cefr_level || 'Unknown'} onChange={(event) => correctLevel(material, event.target.value)}>
+                      {['Unknown', 'A1', 'A2', 'B1'].map((level) => <option key={level}>{level}</option>)}
+                    </select></label>
                   </div>
-                  <small className="text-muted">
-                    This will delete the file from disk and remove all indexed extracted text. This action cannot be undone.
-                  </small>
                 </div>
-                <div className="modal-footer bg-light py-2 border-top d-flex justify-content-end gap-2">
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-secondary"
-                    onClick={() => setDeleteTarget(null)}
-                    disabled={deleting}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-danger"
-                    onClick={confirmDelete}
-                    disabled={deleting}
-                  >
-                    {deleting ? (
-                      <>
-                        <span className="spinner-border spinner-border-sm me-1" role="status"></span>
-                        Deleting...
-                      </>
-                    ) : (
-                      'Delete Material'
-                    )}
-                  </button>
+                <div className="d-flex gap-2 ms-auto">
+                  <a className="btn btn-sm btn-outline-primary" href={isLink ? material.source_url : getMaterialFileUrl(id)} target="_blank" rel="noreferrer" onClick={(event) => {
+                    if (!isLink && !material.storage_filename) {
+                      event.preventDefault();
+                      setError('This file is unavailable.');
+                    }
+                  }}>{isLink ? 'Open link' : 'Open file'} <i className="bi bi-box-arrow-up-right ms-1" /></a>
+                  {material.processing_status === 'ready' && material.notes_count > 0 && <Link className="btn btn-sm btn-outline-secondary" to={`/notes?materialId=${id}`}>View Notes</Link>}
+                  {material.processing_status === 'ready' && material.questions_count > 0 && <Link className="btn btn-sm btn-outline-secondary" to={`/question-bank?materialId=${id}`}>Questions</Link>}
+                  {material.file_type === 'image' && material.status === 'failed' && !material.extracted_text && <button className="btn btn-sm btn-outline-primary" onClick={() => retry(material)} disabled={retryingId === id}>{retryingId === id ? 'Retrying OCR…' : 'Retry OCR & process'}</button>}
+                  {material.status === 'ready' && material.extracted_text && ['failed', 'uploaded'].includes(material.processing_status) && <button className="btn btn-sm btn-outline-primary" onClick={() => retry(material)} disabled={retryingId === id}>{retryingId === id ? 'Starting…' : material.processing_status === 'failed' ? 'Retry AI processing' : 'Generate notes & questions'}</button>}
+                  <Link className="btn btn-sm btn-outline-primary" to={`/tutor?materialId=${id}`}>Ask AI</Link>
+                  <button className="btn btn-sm btn-outline-danger" onClick={() => remove(material)} disabled={deletingId === id}>{deletingId === id ? 'Deleting…' : 'Delete'}</button>
                 </div>
               </div>
-            </div>
-          </div>
-        </>
-      )}
-    </div>
+            </article>;
+          })}
+        </div>}
+      </section>
+    </main>
   );
 }

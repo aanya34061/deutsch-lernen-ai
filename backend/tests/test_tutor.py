@@ -13,6 +13,21 @@ from app.services.ollama_service import (
     OllamaModelMissingError
 )
 from app.services.ai_exercise_service import AiExerciseService
+from app.services.tutor_service import TutorService
+
+
+def test_location_question_is_answered_from_exact_retrieved_sentence():
+    answer = TutorService._source_location_answer(
+        "According to my notes, where does Anna live?",
+        [{
+            "text": "--- Page 1 ---\nIch bin Anna.\nWir wohnen in Berlin. (We live in Berlin.)",
+            "source_title": "A1 Introductions", "page_number": 1,
+        }],
+    )
+    assert answer is not None
+    assert "Wir wohnen in Berlin" in answer
+    assert "inference" in answer
+    assert "A1 Introductions, page 1" in answer
 
 @pytest.mark.asyncio
 async def test_text_chunking_and_metadata_preservation():
@@ -101,6 +116,7 @@ async def test_retrieval_relevance_and_selected_source_filtering():
     # Create two materials
     m1 = await db.materials.insert_one({
         "title": "Articles Guide",
+        "user_id": "default",
         "cefr_level": "A1",
         "topic": "Articles",
         "extracted_text": "Der Apfel ist maskulin. Die Birne ist feminin. Das Buch ist neutral."
@@ -110,6 +126,7 @@ async def test_retrieval_relevance_and_selected_source_filtering():
 
     m2 = await db.materials.insert_one({
         "title": "Separable Verbs",
+        "user_id": "default",
         "cefr_level": "A2",
         "topic": "Verbs",
         "extracted_text": "Aufstehen ist ein trennbares Verb. Ich stehe um 7 Uhr auf."
@@ -146,6 +163,7 @@ async def test_deleted_material_cleans_up_chunks(client):
     db = get_db()
     mat = await db.materials.insert_one({
         "title": "Temporary Study Note",
+        "user_id": "default",
         "file_type": "txt",
         "source_type": "upload",
         "cefr_level": "A1",
@@ -229,6 +247,7 @@ async def test_tutor_chat_success_and_source_attribution(client):
     # Add indexed material
     mat = await db.materials.insert_one({
         "title": "A1 Negation Guide",
+        "user_id": "default",
         "cefr_level": "A1",
         "topic": "Negation",
         "extracted_text": "Nicht verneint Verben und Adjektive. Kein verneint Nomen mit unbestimmtem Artikel."
@@ -311,7 +330,7 @@ async def test_chat_payload_validation(client):
 
 @pytest.mark.asyncio
 async def test_ai_exercise_generation_and_malformed_handling(client):
-    """Do not label a fabricated exercise set as model-generated when output is malformed."""
+    """Malformed AI output may use authored fallback questions, never AI labels."""
     with patch.object(
         OllamaService,
         "check_status",
@@ -325,8 +344,13 @@ async def test_ai_exercise_generation_and_malformed_handling(client):
             "cefr_level": "A1",
             "count": 3
         })
-        assert gen_res.status_code == 503
-        assert "unavailable" in gen_res.json()["detail"].lower() or "failed to generate" in gen_res.json()["detail"].lower()
+        assert gen_res.status_code == 200
+        generated_ids = [item["id"] for item in gen_res.json()]
+        assert len(generated_ids) == 3
+        fallback_docs = await get_db().exercises.find({"id": {"$in": generated_ids}}).to_list(length=3)
+        assert len(fallback_docs) == 3
+        assert all(item["is_ai_generated"] is False for item in fallback_docs)
+        await get_db().exercises.delete_many({"id": {"$in": generated_ids}})
 
 @pytest.mark.asyncio
 async def test_index_rebuild_and_retry_endpoints(client):

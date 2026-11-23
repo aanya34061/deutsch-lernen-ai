@@ -193,6 +193,8 @@ async def generate_exercises(req: TutorExerciseGenerateRequest):
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
     except Exception as e:
         logger.error("Exercise generation failed (%s).", type(e).__name__)
         raise HTTPException(

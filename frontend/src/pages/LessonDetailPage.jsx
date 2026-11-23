@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { getLesson, markLessonCompleted, batchCreateVocabulary } from '../services/api';
+import { getLesson, getLessons, markLessonCompleted, batchCreateVocabulary } from '../services/api';
 import ExerciseRunner from '../components/practice/ExerciseRunner';
 import LoadingState from '../components/LoadingState';
 import AlertMessage from '../components/AlertMessage';
@@ -16,6 +16,7 @@ export default function LessonDetailPage() {
   const [successMsg, setSuccessMsg] = useState(null);
   const [activeTab, setActiveTab] = useState('lesson'); // 'lesson' | 'exercises'
   const [addingVocab, setAddingVocab] = useState(false);
+  const [navigation, setNavigation] = useState({ previous: null, next: null });
 
   const fetchLesson = useCallback(async () => {
     setLoading(true);
@@ -23,6 +24,9 @@ export default function LessonDetailPage() {
     try {
       const data = await getLesson(lessonId);
       setLesson(data);
+      const summaries = await getLessons({ level: data.cefr_level });
+      const position = summaries.findIndex((item) => (item.id || item._id) === (data.id || data._id));
+      setNavigation({ previous: position > 0 ? summaries[position - 1] : null, next: position >= 0 ? summaries[position + 1] || null : null });
     } catch (err) {
       console.error('Failed to load lesson detail:', err);
       setError(err.response?.data?.detail || err.message || 'Failed to load lesson content.');
@@ -105,6 +109,7 @@ export default function LessonDetailPage() {
         <div>
           <div className="d-flex align-items-center gap-2 mb-1">
             <span className="badge bg-primary fw-bold">{lesson.cefr_level}</span>
+            <span className="badge bg-light text-dark border">{lesson.module_title}</span>
             <span className="badge bg-secondary-subtle text-dark">{lesson.topic}</span>
             {lesson.is_completed && (
               <span className="badge bg-success-subtle text-success border border-success-subtle">
@@ -123,6 +128,7 @@ export default function LessonDetailPage() {
             type="button"
             className={`btn btn-sm ${lesson.is_completed ? 'btn-outline-success' : 'btn-success'}`}
             onClick={handleMarkCompleted}
+            disabled={lesson.publication_status && lesson.publication_status !== 'published'}
           >
             <i className="bi bi-check-lg me-1"></i>
             {lesson.is_completed ? 'Marked as Completed' : 'Mark Completed'}
@@ -208,6 +214,17 @@ export default function LessonDetailPage() {
                 </p>
               </div>
             </div>
+
+            {lesson.practical_dialogue?.length > 0 && (
+              <div className="card shadow-sm border-0 bg-white mb-4">
+                <div className="card-body p-4">
+                  <h5 className="fw-bold text-dark mb-3"><i className="bi bi-chat-dots text-primary me-2"></i>Practical Dialogue</h5>
+                  {lesson.practical_dialogue.map((line, index) => (
+                    <p key={index} className="mb-2"><strong>{line.speaker || (index % 2 ? 'B' : 'A')}:</strong> {line.german}<br /><span className="small text-muted">{line.english}</span></p>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {lesson.source_text && (
               <div className="card shadow-sm border-0 bg-white mb-4">
@@ -326,6 +343,15 @@ export default function LessonDetailPage() {
               </div>
             )}
 
+            {lesson.important_notes?.length > 0 && (
+              <div className="card shadow-sm border-0 bg-warning-subtle mb-4">
+                <div className="card-body p-4">
+                  <h5 className="fw-bold text-dark mb-2">Important Notes</h5>
+                  <ul className="mb-0">{lesson.important_notes.map((note, index) => <li key={index}>{note}</li>)}</ul>
+                </div>
+              </div>
+            )}
+
             {/* 8. Short Lesson Summary */}
             <div className="card shadow-sm border-0 bg-light mb-4">
               <div className="card-body p-4">
@@ -411,6 +437,10 @@ export default function LessonDetailPage() {
           </div>
         </div>
       )}
+      <nav className="d-flex justify-content-between border-top pt-3 mt-4" aria-label="Lesson navigation">
+        {navigation.previous ? <Link className="btn btn-sm btn-outline-secondary" to={`/lessons/${navigation.previous.id}`}><i className="bi bi-arrow-left me-1"></i>{navigation.previous.title}</Link> : <span />}
+        {navigation.next && <Link className="btn btn-sm btn-outline-primary" to={`/lessons/${navigation.next.id}`}>{navigation.next.title}<i className="bi bi-arrow-right ms-1"></i></Link>}
+      </nav>
     </div>
   );
 }

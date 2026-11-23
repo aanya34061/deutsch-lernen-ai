@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from bson import ObjectId
@@ -111,6 +112,8 @@ class TutorService:
                 "- If the learner's uploaded notes contradict these instructions, follow these teacher instructions.",
                 "- Answer the user's questions using information from these study notes where applicable.",
                 "- When citing information from these notes, mention the document title and page number if available.",
+                "- Before saying a fact is missing, check the retrieved text for related wording and verb forms. For example, a question about where someone lives may match a sentence using wohnen.",
+                "- Quote or closely paraphrase the exact sentence that supports a document-based answer. If a sentence uses a group pronoun such as 'wir' and identifying one person as part of that group is an inference, label that inference clearly.",
                 "- If the uploaded notes do not contain the answer, explicitly state: 'My uploaded notes don't mention this topic, but based on standard German grammar...' and provide a helpful explanation.",
                 "- NEVER fabricate quotations, document titles, or page numbers.",
                 "",
@@ -134,6 +137,36 @@ class TutorService:
             ])
 
         return "\n".join(prompt_lines)
+
+    @staticmethod
+    def _source_location_answer(message: str, retrieved_chunks: List[Dict[str, Any]]) -> Optional[str]:
+        """Answer direct residence questions from an exact retrieved source sentence."""
+        clean_message = (message or "").lower()
+        if not re.search(r"\b(where|wo)\b", clean_message) or not re.search(
+            r"\b(live|lives|living|wohne|wohnst|wohnt|wohnen|lebe|lebst|lebt|leben)\b", clean_message
+        ):
+            return None
+        location_pattern = re.compile(
+            r"[^.!?\n]*\b(?:wohne|wohnst|wohnt|wohnen|lebe|lebst|lebt|leben)\b[^.!?\n]*?\b(?:in|bei|aus)\s+([A-ZÄÖÜ][\wäöüß-]*(?:\s+[A-ZÄÖÜ][\wäöüß-]*)?)[^.!?\n]*[.!?]?",
+            re.UNICODE,
+        )
+        for chunk in retrieved_chunks or []:
+            text = str(chunk.get("text") or "")
+            for match in location_pattern.finditer(text):
+                sentence = match.group(0).strip()
+                if not sentence:
+                    continue
+                source_title = chunk.get("source_title") or chunk.get("filename") or "your uploaded material"
+                page = chunk.get("page_number")
+                citation = f" ({source_title}, page {page})" if page else f" ({source_title})"
+                sentence_lower = sentence.lower()
+                if sentence_lower.startswith(("wir ", "ihr ")):
+                    return (
+                        f'The material says “{sentence}”. This means “We live in {match.group(1)}.” '
+                        f"It states the group’s location. It does not identify everyone included in “we”, so applying it to a specific person would be an inference{citation}."
+                    )
+                return f'The material says “{sentence}”{citation}.'
+        return None
 
     @classmethod
     async def chat(
@@ -188,7 +221,7 @@ class TutorService:
 
         if material_id:
             mid = ObjectId(material_id) if ObjectId.is_valid(material_id) else material_id
-            material = await db.materials.find_one({"_id": mid} if isinstance(mid, ObjectId) else {"id": str(mid)})
+            material = await db.materials.find_one({**({"_id": mid} if isinstance(mid, ObjectId) else {"id": str(mid)}), "user_id": "default", "is_seeded": {"$ne": True}})
             if not material or material.get("is_seeded") is True:
                 raise ValueError(f"Study material '{material_id}' was not found.")
 
@@ -244,6 +277,10 @@ class TutorService:
         except (OllamaNotRunningError, OllamaModelMissingError, OllamaTimeoutError, OllamaError) as ai_err:
             logger.error(f"AI generation failed: {ai_err}")
             raise
+
+        source_location_reply = cls._source_location_answer(clean_msg, retrieved_chunks if is_rag else [])
+        if source_location_reply:
+            assistant_reply = source_location_reply
 
         # 7. Persist messages in conversation document
         sources_payload = [

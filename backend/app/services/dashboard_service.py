@@ -5,9 +5,7 @@ from app.database import get_db
 from app.models.progress import DashboardSummaryResponse, DailyStats, SkillScores
 from app.models.material import MaterialResponse
 from app.models.vocabulary import VocabularyResponse
-from app.data.curriculum_a1 import A1_LESSONS
-from app.data.curriculum_a2 import A2_LESSONS
-from app.data.curriculum_b1 import B1_LESSONS
+from app.data.curriculum_manifest import get_curriculum_manifest
 
 
 class DashboardService:
@@ -77,7 +75,7 @@ class DashboardService:
             streak += 1
             date_cursor -= timedelta(days=1)
 
-        recent_docs = await db.materials.find({"is_seeded": {"$ne": True}}).sort("created_at", -1).limit(5).to_list(length=5)
+        recent_docs = await db.materials.find({"user_id": "default", "is_seeded": {"$ne": True}}).sort("created_at", -1).limit(5).to_list(length=5)
         recent_materials = []
         for doc in recent_docs:
             doc["id"] = str(doc.get("_id", doc.get("id", "")))
@@ -95,10 +93,10 @@ class DashboardService:
             vocab_queue.append(VocabularyResponse(**doc))
         progress = await db.progress.find_one({"user_id": "default", "is_seeded": False})
         completed_lessons = set(progress.get("completed_lessons", [])) if progress else set()
+        manifest_lessons = get_curriculum_manifest()["lessons"]
         curriculum_by_level = {
-            "A1": A1_LESSONS,
-            "A2": A2_LESSONS,
-            "B1": B1_LESSONS,
+            level: [item for item in manifest_lessons if item["cefr_level"] == level]
+            for level in ("A1", "A2", "B1")
         }
         level_progress = {
             level: {

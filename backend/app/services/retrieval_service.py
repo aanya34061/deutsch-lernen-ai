@@ -192,11 +192,21 @@ class RetrievalService:
         threshold = min_similarity if min_similarity is not None else settings.RAG_SIMILARITY_THRESHOLD
 
         db = get_db()
-        filter_query: Dict[str, Any] = {}
+        owner_materials = await db.materials.find(
+            {"user_id": "default", "is_seeded": {"$ne": True}, "indexing_status": "indexed"},
+            {"_id": 1},
+        ).to_list(length=10000)
+        owner_ids = [str(item["_id"]) for item in owner_materials]
+        if not owner_ids:
+            return []
+        filter_query: Dict[str, Any] = {"material_id": {"$in": owner_ids}}
 
         # Material filter (selected source)
         if material_id and material_id.strip():
-            filter_query["material_id"] = str(material_id).strip()
+            requested_id = str(material_id).strip()
+            if requested_id not in owner_ids:
+                return []
+            filter_query["material_id"] = requested_id
 
         # Query MongoDB
         cursor = db.knowledge_chunks.find(filter_query)
