@@ -128,7 +128,7 @@ This section supersedes the earlier “remaining work” statements above where 
 | German curriculum review | Rechecked the 87-lesson manifest (28 A1, 31 A2, 28 B1), its 264 exercises, and answer-option/token consistency; the structural answer-key scan found no mismatches. Existing content was left intact. | **Partial**. This is not a full human grammar, translation, answer rationale, or CEFR proofread by a German instructor. |
 | Dependency security and reproducibility | Added `backend/requirements.in`; generated a Python 3.12 hash-pinned `backend/requirements.txt`; moved compiler/audit tools into dev requirements. Installed from the lock successfully. `pip-audit` reported no known vulnerabilities for the locked runtime packages. | Python audit/lock **verified**. `npm audit` could not reach the npm advisory endpoint; frontend dependency vulnerability status remains **unknown**. |
 | Error monitoring/alerting | Added optional Sentry SDK setup, health reporting, and event scrubbing that removes request/user data, frame locals, and exception text. | Integration **implemented**, but no Sentry DSN/project/alert rules are configured in production; monitoring and alert delivery are **not active**. |
-| GitHub source | Changes are on the dedicated branch listed above. | Commit and push are performed after the final local review; no main-branch merge is included. |
+| GitHub source | Changes were committed as `ab2c1bd` and pushed to `codex/production-readiness-fixes`. | **Pushed and verified**; no main-branch merge is included. |
 
 ### Updated live checks and tests
 
