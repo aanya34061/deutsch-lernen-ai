@@ -239,6 +239,12 @@ The progress service has isolated tests for empty activity, user scoping, explic
 
 ## Deployment Preparation
 
+### Free Render preview
+
+The repository includes a Render Blueprint (`render.yaml`) for a free static frontend and Python API. To create both services, create a free MongoDB Atlas cluster, copy its connection string, then choose **New + → Blueprint** in Render and connect this GitHub repository. Enter the Atlas URI when Render prompts for `MONGODB_URI`. The Blueprint links the frontend origin to the API's CORS configuration and sets the frontend API URL automatically.
+
+This is suitable for a temporary preview only: free Render APIs sleep after 15 minutes of inactivity and have temporary storage, so uploaded files disappear after restarts. Ollama remains local to your computer and is unavailable to the hosted API. The app has no authentication; use a new, empty cloud database and do not put private notes or learner records in this public deployment.
+
 - Set `APP_ENV=production`, `DEBUG=false`, `MONGODB_URI`, `MONGODB_DB_NAME`, `UPLOAD_DIR`, and `CORS_ORIGINS` in the backend environment. Use a persistent MongoDB database and restrict CORS to the frontend's actual origin.
 - Set `VITE_API_BASE_URL` at frontend build time. The default `/api/v1` expects the frontend host or reverse proxy to route that path to FastAPI; a separately hosted API can use its absolute API base URL.
 - FastAPI health is available at `/api/v1/health`. A production process should bind to the host/port provided by the deployment environment and run without `--reload`.
