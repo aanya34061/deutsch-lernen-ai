@@ -50,13 +50,16 @@ class Settings(BaseSettings):
     CHAT_MAX_MESSAGE_LENGTH: int = 2000
     
     # Security & CORS
-    CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000"
+    CORS_ORIGINS: str = ""
     SESSION_COOKIE_NAME: str = "deutsch_session"
     SESSION_TTL_DAYS: int = 14
 
     @property
     def cors_origin_list(self) -> list[str]:
-        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+        origins = [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+        if not origins and self.APP_ENV.lower() != "production":
+            return ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"]
+        return origins
 
 settings = Settings()
 if settings.APP_ENV.lower() == "production":
