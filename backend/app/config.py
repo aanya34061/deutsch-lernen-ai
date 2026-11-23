@@ -68,6 +68,6 @@ if settings.APP_ENV.lower() == "production":
         raise RuntimeError("Production requires S3-compatible persistent file storage.")
     if "*" in settings.cors_origin_list:
         raise RuntimeError("Production CORS must use explicit frontend origins.")
-    if not settings.cors_origin_list or any("localhost" in origin or "127.0.0.1" in origin for origin in settings.cors_origin_list):
-        raise RuntimeError("Production CORS_ORIGINS must contain the deployed frontend origin.")
+    if any("localhost" in origin or "127.0.0.1" in origin for origin in settings.cors_origin_list):
+        raise RuntimeError("Production CORS_ORIGINS cannot contain local development origins.")
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)

@@ -1,5 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -62,8 +63,12 @@ app.add_middleware(
 async def learner_session_middleware(request: Request, call_next):
     if request.url.path.startswith(API_V1_PREFIX) and request.method != "OPTIONS":
         origin = request.headers.get("origin")
-        if origin and origin.rstrip("/") not in settings.cors_origin_list:
-            return JSONResponse(status_code=403, content={"detail": "Request origin is not allowed."})
+        if origin:
+            request_origin = f"{request.url.scheme}://{request.url.netloc}"
+            parsed_origin = urlsplit(origin)
+            normalized_origin = f"{parsed_origin.scheme}://{parsed_origin.netloc}"
+            if normalized_origin != request_origin and normalized_origin not in settings.cors_origin_list:
+                return JSONResponse(status_code=403, content={"detail": "Request origin is not allowed."})
         try:
             _, user_id_token, user_token = await authenticate_request(request)
         except HTTPException as exc:

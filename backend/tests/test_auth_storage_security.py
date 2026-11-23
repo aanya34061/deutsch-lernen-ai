@@ -33,6 +33,23 @@ async def test_api_requires_session_and_login_logout(client):
 
 
 @pytest.mark.asyncio
+async def test_same_origin_api_requests_are_allowed_without_cors_allowlist(client):
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Origin": "http://test"},
+    ) as same_origin:
+        assert (await same_origin.get("/api/v1/dashboard")).status_code == 401
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Origin": "https://attacker.invalid"},
+    ) as cross_origin:
+        assert (await cross_origin.get("/api/v1/dashboard")).status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_learner_records_and_material_files_are_owner_scoped(client):
     created = await client.post(
         "/api/v1/library/upload",
