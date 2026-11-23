@@ -1,5 +1,7 @@
 import io
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+import httpx
 import pytest
 from httpx import AsyncClient
 from starlette.datastructures import UploadFile as StarletteUploadFile
@@ -11,6 +13,7 @@ from app.services.library_service import (
     LibraryService,
     is_within_upload_dir,
 )
+from app.services.extractor_service import ExtractorService, _PinnedURLTransport
 from app.models.material import LearningLinkCreate
 
 
@@ -119,6 +122,7 @@ async def test_added_learning_link_is_marked_as_user_content(monkeypatch):
     db.materials = materials
     monkeypatch.setattr("app.services.library_service.get_db", lambda: db)
     monkeypatch.setattr("app.services.library_service.ExtractorService.parse_youtube_video_id", lambda _url: None)
+    monkeypatch.setattr("app.services.library_service.ExtractorService.is_public_http_url", lambda _url: _async_true())
     async def extract(_url):
         return {"title": "A German article", "text": "", "summary": "Article", "error": None}
     monkeypatch.setattr("app.services.library_service.ExtractorService.extract_from_web_url", extract)
@@ -127,6 +131,10 @@ async def test_added_learning_link_is_marked_as_user_content(monkeypatch):
 
     assert materials.inserted["source_type"] == "link"
     assert materials.inserted["is_seeded"] is False
+
+
+async def _async_true():
+    return True
 
 SAMPLE_PDF_BYTES = b"""%PDF-1.4
 1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
@@ -323,6 +331,68 @@ async def test_add_invalid_url(client: AsyncClient):
     res = await client.post("/api/v1/library/links", json=data)
     assert res.status_code == 400
     assert "URL must start with" in res.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_add_link_rejects_local_or_private_destinations(client: AsyncClient):
+    for url in ("http://127.0.0.1/private", "http://localhost/admin", "http://169.254.169.254/latest/meta-data/"):
+        response = await client.post("/api/v1/library/links", json={"url": url, "cefr_level": "A1"})
+        assert response.status_code == 400
+        assert "public HTTP(S)" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_revalidates_redirect_destinations(monkeypatch):
+    requests = []
+
+    def redirect_to_local(request):
+        requests.append((
+            request.url.host,
+            request.headers.get("host"),
+            request.extensions.get("sni_hostname"),
+        ))
+        return httpx.Response(302, headers={"Location": "http://127.0.0.1/private"})
+
+    upstream = httpx.MockTransport(redirect_to_local)
+    monkeypatch.setattr(
+        ExtractorService, "resolve_public_http_address", AsyncMock(side_effect=["93.184.216.34", None])
+    )
+    monkeypatch.setattr(
+        "app.services.extractor_service._PinnedURLTransport",
+        lambda address, hostname: _PinnedURLTransport(address, hostname, upstream=upstream),
+    )
+    result = await ExtractorService.extract_from_web_url("https://learn.example/article")
+    assert result["has_text"] is False
+    assert "publicly accessible" in result["error"]
+    assert requests == [("93.184.216.34", "learn.example", b"learn.example")]
+
+
+@pytest.mark.asyncio
+async def test_url_resolver_rejects_a_hostname_with_any_non_public_dns_answer(monkeypatch):
+    import socket
+
+    records = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0)),
+    ]
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *_args, **_kwargs: records)
+
+    address = await ExtractorService.resolve_public_http_address("https://rebinding.example/article")
+
+    assert address is None
+
+
+def test_pinned_url_transport_disables_environment_proxy_resolution(monkeypatch):
+    options = {}
+
+    class Transport:
+        def __init__(self, **kwargs):
+            options.update(kwargs)
+
+    monkeypatch.setattr("app.services.extractor_service.httpx.AsyncHTTPTransport", Transport)
+    _PinnedURLTransport("93.184.216.34", "example.org")
+
+    assert options == {"trust_env": False}
 
 
 @pytest.mark.asyncio

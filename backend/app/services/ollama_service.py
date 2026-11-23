@@ -164,7 +164,7 @@ class OllamaService:
                 "setup_instructions": "Ensure Ollama is responsive on " + base_url
             }
         except Exception as e:
-            logger.warning(f"Error checking Ollama status: {e}")
+            logger.warning("Error checking Ollama status (%s).", type(e).__name__)
             return {
                 "status": "error",
                 "is_ready": False,
@@ -175,7 +175,7 @@ class OllamaService:
                 "embed_model_available": False,
                 "installed_models": [],
                 "base_url": base_url,
-                "message": f"Ollama check failed: {str(e)}",
+                "message": "The configured AI service could not be checked.",
                 "setup_instructions": "Check Ollama installation and connection settings."
             }
 

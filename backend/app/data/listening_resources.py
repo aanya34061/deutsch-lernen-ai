@@ -32,7 +32,7 @@ LISTENING_RESOURCE_CATALOG = [
         "categories": ["German Lessons", "Listening Practice", "Everyday Conversations"],
         "topic": "Everyday announcements and conversations",
         "publisher": "Goethe-Institut",
-        "source_url": "https://www.goethe.de/ins/de/de/m/prf/prf/gzsd1/ueb.html",
+        "source_url": "https://www.goethe.de/ins/de/de/prf/gzsd1/ueb.html",
         "audio_url": None,
         "transcript_url": None,
         "duration_seconds": 17 * 60 + 8,

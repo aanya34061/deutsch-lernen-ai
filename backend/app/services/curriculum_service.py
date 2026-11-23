@@ -22,13 +22,21 @@ class CurriculumService:
         modules = await db.curriculum_modules.find(query).sort([("level", 1), ("order", 1)]).to_list(length=100)
         if not modules:
             modules = [m for m in _MANIFEST["modules"] if not level or m["level"] == level.upper()]
+        module_ids = [module["module_id"] for module in modules]
+        topic_docs = await db.curriculum_topics.find({
+            "module_id": {"$in": module_ids}, "publication_status": "published"
+        }).sort("order", 1).to_list(length=1000) if module_ids else []
+        topics_by_module: Dict[str, List[Dict[str, Any]]] = {module_id: [] for module_id in module_ids}
+        for topic in topic_docs:
+            topics_by_module.setdefault(topic["module_id"], []).append(
+                {key: value for key, value in topic.items() if key != "_id"}
+            )
         result = []
         for module in modules:
             module = {key: value for key, value in module.items() if key != "_id"}
-            topics = await db.curriculum_topics.find({"module_id": module["module_id"], "publication_status": "published"}).sort("order", 1).to_list(length=100)
+            topics = topics_by_module.get(module["module_id"], [])
             if not topics:
                 topics = [t for t in _MANIFEST["topics"] if t["module_id"] == module["module_id"]]
-            topics = [{key: value for key, value in item.items() if key != "_id"} for item in topics]
             result.append({**module, "topics": topics})
         return result
 

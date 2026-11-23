@@ -205,6 +205,18 @@ async def test_tutor_status_endpoint(client):
     assert "total_chunks" in data["indexing"]
 
 @pytest.mark.asyncio
+async def test_tutor_status_hides_unexpected_exception_details(client, monkeypatch):
+    async def fail_status():
+        raise RuntimeError("sensitive internal connection detail")
+
+    monkeypatch.setattr(OllamaService, "check_status", fail_status)
+    response = await client.get("/api/v1/tutor/status")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["message"] == "Tutor status is temporarily unavailable."
+    assert "sensitive internal connection detail" not in response.text
+
+@pytest.mark.asyncio
 async def test_tutor_chat_when_ollama_unavailable(client, monkeypatch):
     """Verify clear 503 error with setup message when Ollama is not running."""
     monkeypatch.setattr(settings, "AI_PROVIDER", "ollama")

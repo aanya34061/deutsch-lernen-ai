@@ -490,7 +490,6 @@ class PracticeService:
         suggestions = []
 
         words = re.findall(r'\b\w+\b', text)
-        word_count = len(words)
 
         # 1. Capitalization check (German nouns must be capitalized)
         common_lower_nouns = {
@@ -517,16 +516,9 @@ class PracticeService:
         for lower_w, cap_w in common_lower_nouns.items():
             corrected = re.sub(r'\b' + lower_w + r'\b', cap_w, corrected)
 
-        # Calculate score based on errors detected and length
-        error_count = len(grammar_mistakes) + len(word_order_mistakes) + len(spelling_mistakes)
-        base_score = 95 - (error_count * 10)
-        if word_count < 10:
-            base_score = max(50, base_score - 15)
-        score = max(50, min(100, base_score))
-
         explanation = (
-            f"Evaluated against standard CEFR {level} grammar rules. "
-            "Verified German capitalization rules, subject-verb presence, and basic sentence structure."
+            f"Basic rule-based checks were applied for CEFR {level}. "
+            "This limited check is not a complete grammar evaluation, so no numeric score is provided."
         )
 
         return {
@@ -538,7 +530,7 @@ class PracticeService:
             "explanation_en": explanation,
             "natural_alternative_de": prompt.sample_solution_de if prompt else None,
             "suggestions": suggestions or ["Keep practicing! For more detailed conversational analysis, start Ollama locally."],
-            "score": score,
+            "score": None,
             "is_ai_evaluated": False,
             "evaluation_source": "deterministic_rules"
         }
@@ -914,6 +906,7 @@ class PracticeService:
             "writing": 0,
             "speaking": 0
         }
+        attempt_counts: Dict[str, int] = {skill: 0 for skill in skill_buckets}
         recent_activity: List[Dict[str, Any]] = []
 
         for att in attempts:
@@ -922,10 +915,11 @@ class PracticeService:
                 score = att.get("score")
                 seconds = att.get("time_spent_seconds") or 0
                 time_buckets[skill] += seconds
+                attempt_counts[skill] += 1
 
                 if isinstance(score, (int, float)):
                     skill_buckets[skill].append(int(score))
-                if isinstance(score, (int, float)) and len(recent_activity) < 10:
+                if len(recent_activity) < 10:
                     recent_activity.append({
                         "exercise_id": att.get("exercise_id"),
                         "skill": skill,
@@ -945,8 +939,8 @@ class PracticeService:
 
         def make_metric(skill_key: str) -> SkillMetric:
             scores = skill_buckets.get(skill_key, [])
-            count = len(scores)
-            avg = round(sum(scores) / count) if count > 0 else None
+            count = attempt_counts.get(skill_key, 0)
+            avg = round(sum(scores) / len(scores)) if scores else None
             mins = round(time_buckets.get(skill_key, 0) / 60)
             return SkillMetric(completed_count=count, average_score=avg, total_time_minutes=mins)
 

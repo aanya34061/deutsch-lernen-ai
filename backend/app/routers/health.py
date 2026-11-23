@@ -14,7 +14,7 @@ async def get_health():
     
     # Check Ollama status safely with short timeout
     ai_status = await OllamaService.check_status()
-    ollama_status = ai_status.get("status") if ai_status.get("provider") == "disabled" else ("online" if ai_status.get("is_ready") else (
+    ollama_status = ai_status.get("status") if ai_status.get("provider") in {"disabled", "hosted"} else ("online" if ai_status.get("is_ready") else (
         "offline" if not ai_status.get("is_running") else f"model_missing ({ai_status.get('configured_model')})"
     ))
 
@@ -26,8 +26,8 @@ async def get_health():
         "database": db_health,
         "ai_engine": {
             "provider": ai_status.get("provider", settings.AI_PROVIDER),
-            "model": settings.OLLAMA_MODEL,
-            "embed_model": settings.OLLAMA_EMBED_MODEL,
+            "model": ai_status.get("configured_model"),
+            "embed_model": ai_status.get("configured_embed_model"),
             "status": ollama_status,
             "detailed_status": ai_status.get("status"),
             "is_ready": ai_status.get("is_ready"),
@@ -39,12 +39,13 @@ async def get_health():
         "file_storage": {
             "provider": settings.STORAGE_PROVIDER,
             "configured": settings.STORAGE_PROVIDER.lower() == "local" or ObjectStorage.configured(),
-            "persistent": settings.STORAGE_PROVIDER.lower() in {"s3", "r2", "s3-compatible"},
+            "persistent": settings.STORAGE_PROVIDER.lower() in {"s3", "r2", "s3-compatible", "vercel-blob"},
         },
         "speech": {
             "stt_provider": settings.STT_PROVIDER,
             "tts_provider": settings.TTS_PROVIDER
         },
+        "error_monitoring": {"provider": "sentry", "configured": bool(settings.SENTRY_DSN)},
         "version": "1.0.0"
     }
     if settings.APP_ENV.lower() == "production" and (not is_overall_healthy or not ObjectStorage.configured()):

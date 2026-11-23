@@ -59,12 +59,13 @@ async def get_tutor_status():
             "indexing": indexing_status
         }
     except Exception as e:
-        logger.error(f"Error checking tutor status: {e}")
+        # Keep internal exception details out of API responses and application logs.
+        logger.error("Error checking tutor status (%s).", type(e).__name__)
         return {
             "status": "error",
             "is_ready": False,
             "is_running": False,
-            "message": str(e),
+            "message": "Tutor status is temporarily unavailable.",
             "indexing": None
         }
 

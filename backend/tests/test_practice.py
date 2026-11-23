@@ -203,8 +203,14 @@ async def test_writing_evaluation_fallback_when_ollama_offline(client):
         data = eval_res.json()
         assert data["is_ai_evaluated"] is False
         assert data["evaluation_source"] == "deterministic_rules"
+        assert data["score"] is None
+        assert "no numeric score" in data["explanation_en"].lower()
         # Deterministic check flags lowercase nouns: 'apfel' and 'schule'
         assert any("Apfel" in m for m in data["spelling_mistakes"])
+        progress = await client.get("/api/v1/practice/progress")
+        assert progress.status_code == 200
+        assert progress.json()["writing"]["completed_count"] == 1
+        assert progress.json()["writing"]["average_score"] is None
 
 @pytest.mark.asyncio
 async def test_speaking_session_lifecycle(client):

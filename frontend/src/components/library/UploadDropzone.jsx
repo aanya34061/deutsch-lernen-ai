@@ -2,7 +2,7 @@ import React, { useState, useRef } from 'react';
 import { uploadMaterial } from '../../services/api';
 
 const SUPPORTED_EXTENSIONS = ['.pdf', '.docx', '.txt', '.jpg', '.jpeg', '.png'];
-const MAX_FILE_SIZE_MB = 25;
+const MAX_FILE_SIZE_MB = import.meta.env.PROD ? 4 : 25;
 const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
 
 export default function UploadDropzone({ onUploadSuccess, onError }) {

@@ -73,7 +73,7 @@ class QuestionEvaluation(BaseModel):
 
 class ReadingSubmissionResponse(BaseModel):
     exercise_id: str
-    score: int  # 0 to 100
+    score: int
     is_perfect: bool
     results: List[QuestionEvaluation]
     translation_en: str
@@ -185,7 +185,7 @@ class WritingEvaluationResponse(BaseModel):
     explanation_en: str
     natural_alternative_de: Optional[str] = None
     suggestions: List[str] = []
-    score: int  # 0 to 100
+    score: Optional[int] = None  # omitted for deterministic rule-based feedback
     is_ai_evaluated: bool = True
     evaluation_source: str = "ollama"  # ollama or deterministic_rules
     timestamp: str

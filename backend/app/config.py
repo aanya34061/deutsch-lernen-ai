@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     S3_SECRET_ACCESS_KEY: Optional[str] = None
     S3_REGION: str = "auto"
     S3_PRESIGNED_URL_SECONDS: int = 300
+    BLOB_READ_WRITE_TOKEN: Optional[str] = None
+    BLOB_STORE_ID: Optional[str] = None
+
+    # Optional external production error monitoring.
+    SENTRY_DSN: Optional[str] = None
+    SENTRY_ENVIRONMENT: Optional[str] = None
     
     # AI & Speech
     AI_PROVIDER: str = "disabled"
@@ -55,6 +61,12 @@ class Settings(BaseSettings):
     SESSION_TTL_DAYS: int = 14
 
     @property
+    def effective_max_upload_size_mb(self) -> int:
+        """Respect Vercel's function request-body limit in production."""
+        configured = max(1, self.MAX_UPLOAD_SIZE_MB)
+        return min(configured, 4) if self.APP_ENV.lower() == "production" else configured
+
+    @property
     def cors_origin_list(self) -> list[str]:
         origins = [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
         if not origins and self.APP_ENV.lower() != "production":
@@ -67,8 +79,8 @@ if settings.APP_ENV.lower() == "production":
         raise RuntimeError("Production requires a remote MongoDB connection through MONGODB_URI.")
     if settings.AI_PROVIDER.lower() == "ollama":
         raise RuntimeError("Production cannot use a local Ollama provider. Configure a hosted provider or disable AI.")
-    if settings.STORAGE_PROVIDER.lower() not in {"s3", "r2", "s3-compatible"}:
-        raise RuntimeError("Production requires S3-compatible persistent file storage.")
+    if settings.STORAGE_PROVIDER.lower() not in {"s3", "r2", "s3-compatible", "vercel-blob"}:
+        raise RuntimeError("Production requires configured persistent file storage.")
     if "*" in settings.cors_origin_list:
         raise RuntimeError("Production CORS must use explicit frontend origins.")
     if any("localhost" in origin or "127.0.0.1" in origin for origin in settings.cors_origin_list):

@@ -2,12 +2,75 @@ import os
 import re
 import shutil
 import logging
+import asyncio
+import ipaddress
+import socket
 from pathlib import Path
 from typing import Optional, Dict, Any
+from urllib.parse import urljoin, urlsplit
+import httpx
 
 logger = logging.getLogger("german_app.extractor")
 
+
+class _PinnedURLTransport(httpx.AsyncBaseTransport):
+    """Connect to a vetted IP while preserving the requested Host header and TLS SNI."""
+
+    def __init__(self, address: str, hostname: str, upstream: Optional[httpx.AsyncBaseTransport] = None):
+        self.address = address
+        self.hostname = hostname
+        self.upstream = upstream or httpx.AsyncHTTPTransport(trust_env=False)
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        extensions = dict(request.extensions)
+        if request.url.scheme == "https":
+            extensions["sni_hostname"] = self.hostname.encode("idna")
+        pinned_request = httpx.Request(
+            request.method,
+            request.url.copy_with(host=self.address),
+            headers=request.headers,
+            stream=request.stream,
+            extensions=extensions,
+        )
+        return await self.upstream.handle_async_request(pinned_request)
+
+    async def aclose(self) -> None:
+        await self.upstream.aclose()
+
 class ExtractorService:
+    @staticmethod
+    async def resolve_public_http_address(url: str) -> Optional[str]:
+        """Resolve a URL and return one public IP to pin for the subsequent request."""
+        try:
+            parsed = urlsplit(url)
+            scheme = parsed.scheme.lower()
+            if scheme not in {"http", "https"} or not parsed.hostname:
+                return None
+            if parsed.username is not None or parsed.password is not None:
+                return None
+            port = parsed.port
+            if port is not None and port not in {80, 443}:
+                return None
+            host = parsed.hostname.rstrip(".")
+            try:
+                addresses = {ipaddress.ip_address(host)}
+            except ValueError:
+                records = await asyncio.to_thread(
+                    socket.getaddrinfo, host, port or (443 if scheme == "https" else 80),
+                    type=socket.SOCK_STREAM,
+                )
+                addresses = {ipaddress.ip_address(record[4][0].split("%")[0]) for record in records}
+            if not addresses or not all(address.is_global for address in addresses):
+                return None
+            return str(sorted(addresses, key=lambda item: (item.version, int(item)))[0])
+        except (OSError, ValueError, UnicodeError):
+            return None
+
+    @staticmethod
+    async def is_public_http_url(url: str) -> bool:
+        """Allow only HTTP(S) URLs that resolve exclusively to public IP addresses."""
+        return await ExtractorService.resolve_public_http_address(url) is not None
+
     @staticmethod
     def extract_from_pdf(file_path: str) -> Dict[str, Any]:
         """Extract text from a PDF file using pypdf."""
@@ -280,21 +343,40 @@ class ExtractorService:
     @staticmethod
     async def extract_from_web_url(url: str) -> Dict[str, Any]:
         """Fetch general learning webpage title and readable text excerpt."""
-        import httpx
         try:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) GermanLearningApp/1.0"
             }
-            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, headers=headers) as client:
-                resp = await client.get(url)
-                if resp.status_code >= 400:
-                    return {
-                        "title": url,
-                        "text": "",
-                        "has_text": False,
-                        "error": f"HTTP {resp.status_code}: Unable to load this page."
-                    }
-                html = resp.text
+            current_url = url
+            for redirect_count in range(4):
+                parsed_url = urlsplit(current_url)
+                pinned_address = await ExtractorService.resolve_public_http_address(current_url)
+                if pinned_address is None:
+                    return {"title": url, "text": "", "has_text": False,
+                            "error": "This link does not resolve to a publicly accessible HTTP(S) address."}
+                transport = _PinnedURLTransport(pinned_address, parsed_url.hostname or "")
+                async with httpx.AsyncClient(
+                    timeout=8.0, follow_redirects=False, trust_env=False,
+                    headers=headers, transport=transport,
+                ) as client:
+                    async with client.stream("GET", current_url) as resp:
+                        if resp.is_redirect:
+                            location = resp.headers.get("location")
+                            if not location or redirect_count == 3:
+                                return {"title": url, "text": "", "has_text": False,
+                                        "error": "The page redirected too many times or returned an invalid redirect."}
+                            current_url = urljoin(current_url, location)
+                            continue
+                        if resp.status_code >= 400:
+                            return {"title": url, "text": "", "has_text": False,
+                                    "error": f"HTTP {resp.status_code}: Unable to load this page."}
+                        content = bytearray()
+                        async for chunk in resp.aiter_bytes():
+                            content.extend(chunk[: max(0, 2 * 1024 * 1024 - len(content))])
+                            if len(content) >= 2 * 1024 * 1024:
+                                break
+                        html = bytes(content).decode(resp.encoding or "utf-8", errors="replace")
+                        break
 
             # Extract title
             title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
@@ -325,12 +407,12 @@ class ExtractorService:
                 "summary": f"Web article: {title}"
             }
         except Exception as e:
-            logger.warning(f"Error fetching web URL {url}: {e}")
+            logger.warning("Error fetching web URL (%s).", type(e).__name__)
             return {
                 "title": url,
                 "text": "",
                 "has_text": False,
-                "error": str(e)
+                "error": "Could not retrieve text from this web page."
             }
 
     @classmethod

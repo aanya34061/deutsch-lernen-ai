@@ -10,6 +10,7 @@ from app.database import connect_to_mongo, close_mongo_connection
 from app.routers import auth, health, dashboard, levels, library, lessons, exercises, vocabulary, tutor, practice, study
 from app.security import authenticate_request, reset_request_user
 from app.services.storage_service import ObjectStorage
+from app.rate_limit import enforce_request_limit
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,12 +19,42 @@ logging.basicConfig(
 logger = logging.getLogger("german_app")
 API_V1_PREFIX = "/api/v1"
 
+
+def _scrub_sentry_event(event, _hint):
+    """Send stack traces without learner input, request data, or credentials."""
+    event.pop("request", None)
+    event.pop("user", None)
+    for value in event.get("exception", {}).get("values", []):
+        value["value"] = "Application exception"
+        for frame in value.get("stacktrace", {}).get("frames", []):
+            frame.pop("vars", None)
+    return event
+
+
+if settings.SENTRY_DSN:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.starlette import StarletteIntegration
+
+        sentry_sdk.init(
+            dsn=settings.SENTRY_DSN,
+            environment=settings.SENTRY_ENVIRONMENT or settings.APP_ENV,
+            integrations=[StarletteIntegration(), FastApiIntegration()],
+            send_default_pii=False,
+            traces_sample_rate=0.0,
+            before_send=_scrub_sentry_event,
+        )
+        logger.info("External error monitoring is enabled.")
+    except ImportError:
+        logger.error("SENTRY_DSN is configured but sentry-sdk is not installed.")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting German Learning App API...")
     if settings.APP_ENV.lower() == "production" and not ObjectStorage.configured():
-        raise RuntimeError("Production requires configured S3-compatible storage credentials.")
+        raise RuntimeError("Production requires configured persistent file storage credentials.")
     await connect_to_mongo()
     yield
     # Shutdown
@@ -62,6 +93,13 @@ app.add_middleware(
 @app.middleware("http")
 async def learner_session_middleware(request: Request, call_next):
     if request.url.path.startswith(API_V1_PREFIX) and request.method != "OPTIONS":
+        allowed, retry_after = await enforce_request_limit(request)
+        if not allowed:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests. Please wait and try again."},
+                headers={"Retry-After": str(retry_after)},
+            )
         origin = request.headers.get("origin")
         if origin:
             request_origin = f"{request.url.scheme}://{request.url.netloc}"

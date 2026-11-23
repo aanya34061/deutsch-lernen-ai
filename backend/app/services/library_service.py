@@ -135,7 +135,7 @@ class LibraryService:
             )
 
         # 3. Stream file to disk and validate size limit
-        max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        max_bytes = settings.effective_max_upload_size_mb * 1024 * 1024
         total_size = 0
         content_hasher = hashlib.sha256()
         try:
@@ -149,7 +149,7 @@ class LibraryService:
                             destination_path.unlink()
                         raise HTTPException(
                             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                            detail=f"File exceeds maximum allowed size of {settings.MAX_UPLOAD_SIZE_MB}MB."
+                            detail=f"File exceeds maximum allowed size of {settings.effective_max_upload_size_mb}MB."
                         )
                     f.write(chunk)
                     content_hasher.update(chunk)
@@ -210,7 +210,7 @@ class LibraryService:
                         logger.warning("Retry indexing failed for %s (%s).", duplicate["_id"], type(index_error).__name__)
             return MaterialResponse(**str_id(duplicate))
 
-        use_object_storage = settings.STORAGE_PROVIDER.strip().lower() in {"s3", "r2", "s3-compatible"}
+        use_object_storage = settings.STORAGE_PROVIDER.strip().lower() in {"s3", "r2", "s3-compatible", "vercel-blob"}
         material_oid = ObjectId()
         storage_key = f"{owner_id}/{material_oid}/{storage_filename}" if use_object_storage else None
         if use_object_storage:
@@ -229,7 +229,7 @@ class LibraryService:
             "storage_filename": storage_filename,
             "file_path": None if use_object_storage else str(destination_path),
             "storage_key": storage_key,
-            "storage_provider": "s3" if use_object_storage else "local",
+            "storage_provider": settings.STORAGE_PROVIDER.strip().lower() if use_object_storage else "local",
             "file_type": file_type,
             "file_size": total_size,
             "source_type": "upload",
@@ -289,6 +289,11 @@ class LibraryService:
             level_upper = "Unknown"
 
         is_youtube = bool(ExtractorService.parse_youtube_video_id(url))
+        if not await ExtractorService.is_public_http_url(url):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only public HTTP(S) learning links can be added.",
+            )
         file_type = "youtube" if is_youtube else "link"
 
         if is_youtube:

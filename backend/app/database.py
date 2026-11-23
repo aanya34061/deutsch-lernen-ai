@@ -66,6 +66,7 @@ async def init_db_indexes():
         await db.accounts.create_index("username", unique=True)
         await db.sessions.create_index("token_hash", unique=True)
         await db.sessions.create_index("expires_at", expireAfterSeconds=0)
+        await db.request_limits.create_index("expires_at", expireAfterSeconds=0)
         # users
         await db.users.create_index("username", unique=True)
         # materials
@@ -82,7 +83,9 @@ async def init_db_indexes():
         # lessons
         await db.lessons.create_index([("cefr_level", 1), ("order", 1)])
         await db.curriculum_modules.create_index("module_id", unique=True)
+        await db.curriculum_modules.create_index([("level", 1), ("publication_status", 1), ("order", 1)])
         await db.curriculum_topics.create_index("topic_id", unique=True)
+        await db.curriculum_topics.create_index([("module_id", 1), ("publication_status", 1), ("order", 1)])
         await db.curriculum_lessons.create_index("lesson_id", unique=True)
         await db.curriculum_lessons.create_index([("cefr_level", 1), ("order", 1)])
         # exercises

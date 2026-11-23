@@ -1,4 +1,7 @@
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
+import hashlib
+from bson import ObjectId
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -30,6 +33,21 @@ async def test_api_requires_session_and_login_logout(client):
     assert logged_in.status_code == 200
     client.headers["X-CSRF-Token"] = logged_in.json()["csrf_token"]
     assert (await client.get("/api/v1/dashboard")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_invalid_and_expired_sessions_are_rejected(client):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as invalid:
+        invalid.cookies.set(settings.SESSION_COOKIE_NAME, "not-a-valid-session")
+        assert (await invalid.get("/api/v1/dashboard")).status_code == 401
+
+    token = client.cookies.get(settings.SESSION_COOKIE_NAME)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    await get_db().sessions.update_one(
+        {"token_hash": token_hash},
+        {"$set": {"expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)}},
+    )
+    assert (await client.get("/api/v1/dashboard")).status_code == 401
 
 
 @pytest.mark.asyncio
@@ -81,6 +99,72 @@ async def test_learner_records_and_material_files_are_owner_scoped(client):
         "type": "true_false",
         "correct_answer": True,
     })
+    completed_lesson = await get_db().progress.insert_one({
+        "user_id": client.user_id,
+        "is_seeded": False,
+        "completed_lessons": ["a1-lesson-1"],
+    })
+    private_conversation_id = ObjectId()
+    await get_db().conversations.insert_one({
+        "_id": private_conversation_id,
+        "user_id": client.user_id,
+        "title": "Private tutor session",
+        "cefr_level": "A1",
+        "messages": [{"role": "user", "content": "private"}],
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+    draft_id = ObjectId()
+    await get_db().writing_drafts.insert_one({
+        "_id": draft_id,
+        "user_id": client.user_id,
+        "prompt_id": "cross-user-test-prompt",
+        "content": "Private draft",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+    await get_db().writing_submissions.insert_one({
+        "user_id": client.user_id,
+        "prompt_id": "cross-user-test-prompt",
+        "original_text": "Private submission",
+        "corrected_text": "Private correction",
+        "explanation_en": "Private feedback",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+    })
+    speaking_session_id = "spk_private_cross_user_test"
+    await get_db().speaking_sessions.insert_one({
+        "session_id": speaking_session_id,
+        "user_id": client.user_id,
+        "is_seeded": False,
+        "messages": [],
+        "turn_count": 1,
+    })
+    await get_db().exercise_attempts.insert_one({
+        "user_id": client.user_id,
+        "is_seeded": False,
+        "exercise_id": "private-attempt",
+        "skill": "reading",
+        "score": 100,
+        "timestamp": "2026-01-01T00:00:00+00:00",
+    })
+    await get_db().listening_resource_completions.insert_one({
+        "user_id": client.user_id,
+        "resource_id": "goethe-a1-model-listening",
+        "completed_at": "2026-01-01T00:00:00+00:00",
+    })
+    custom_lesson = await get_db().lessons.insert_one({
+        "user_id": client.user_id,
+        "title": "Private custom lesson",
+        "cefr_level": "A1",
+        "topic": "Private",
+        "exercises": [],
+    })
+    await get_db().knowledge_chunks.insert_one({
+        "user_id": client.user_id,
+        "material_id": material_id,
+        "text": "Private RAG content",
+        "embedding": [1.0, 0.0],
+        "cefr_level": "A1",
+    })
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as other:
         credentials = {"username": "other-learner", "password": "Different-Passphrase-7582!"}
@@ -98,6 +182,18 @@ async def test_learner_records_and_material_files_are_owner_scoped(client):
         assert (await other.get(f"/api/v1/study/notes/{note.inserted_id}")).status_code == 404
         assert (await other.get(f"/api/v1/exercises/{question_id}")).status_code == 404
         assert (await other.get("/api/v1/study/questions")).json() == []
+        assert (await other.get(f"/api/v1/tutor/conversations?user_id={client.user_id}")).json() == []
+        assert (await other.get(f"/api/v1/tutor/conversations/{private_conversation_id}")).status_code == 404
+        assert (await other.delete(f"/api/v1/tutor/conversations/{private_conversation_id}")).status_code == 404
+        assert (await other.get("/api/v1/practice/writing/drafts/cross-user-test-prompt")).json() is None
+        assert (await other.delete(f"/api/v1/practice/writing/drafts/{draft_id}")).status_code == 404
+        assert (await other.get("/api/v1/practice/writing/submissions")).json() == []
+        assert (await other.get(f"/api/v1/practice/speaking/sessions/{speaking_session_id}")).status_code == 404
+        assert (await other.get(f"/api/v1/lessons/{custom_lesson.inserted_id}")).status_code == 404
+        assert (await other.get("/api/v1/lessons")).json()[0]["is_completed"] is False
+        assert all(item["completed_at"] is None for item in (await other.get("/api/v1/practice/listening/resources?level=A1")).json())
+        assert (await other.get("/api/v1/tutor/index/status")).json()["total_chunks"] == 0
+        assert (await other.get("/api/v1/practice/progress")).json()["total_completed"] == 0
 
     assert (await client.get(f"/api/v1/library/{material_id}")).status_code == 200
     assert (await client.get(f"/api/v1/library/{material_id}/file")).status_code == 200

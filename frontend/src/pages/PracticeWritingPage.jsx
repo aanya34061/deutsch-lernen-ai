@@ -150,7 +150,9 @@ export default function PracticeWritingPage({ currentLevel }) {
         cefr_level: level
       });
       setEvaluation(res);
-      setSuccessMessage(`Writing evaluated! Score: ${res.score}/100`);
+      setSuccessMessage(res.score == null
+        ? 'Your writing was saved with basic rule-based feedback. No numeric score is available while AI is offline.'
+        : `Writing evaluated! Score: ${res.score}/100`);
 
       // Refresh previous submissions list
       try {
@@ -404,8 +406,8 @@ export default function PracticeWritingPage({ currentLevel }) {
                       </span>
                     </div>
 
-                    <span className={`badge ${evaluation.score >= 70 ? 'bg-success' : 'bg-warning text-dark'} fs-6`}>
-                      Score: {evaluation.score}/100
+                    <span className={`badge ${evaluation.score == null ? 'bg-secondary' : evaluation.score >= 70 ? 'bg-success' : 'bg-warning text-dark'} fs-6`}>
+                      {evaluation.score == null ? 'No numeric score' : `Score: ${evaluation.score}/100`}
                     </span>
                   </div>
 

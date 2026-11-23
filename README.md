@@ -181,8 +181,8 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Install dependencies
-pip install -r requirements.txt
+# Install runtime and test dependencies
+pip install -r requirements-dev.txt
 
 # Run backend automated tests
 pytest -v
@@ -242,6 +242,18 @@ The progress service has isolated tests for empty activity, user scoping, explic
 ### Free Render preview
 
 The repository includes a Render Blueprint (`render.yaml`) for a static React frontend and Python API. Create a MongoDB Atlas cluster and database user, then create a Blueprint in Render connected to this repository. Supply `MONGODB_URI` and the S3-compatible storage values when prompted. Render links the frontend origin to API CORS and supplies the API origin to Vite automatically. The backend refuses a local MongoDB URI and local Ollama provider in production.
+
+### Vercel deployment
+
+The root `vercel.json` deploys the Vite frontend and FastAPI backend as Vercel services and routes `/api/*` to the backend. For persistent production data, provision MongoDB Atlas from Vercel Marketplace on its Free plan and connect it to the project; Vercel supplies `MONGODB_URI`. Create a private Vercel Blob store connected to the project; Vercel supplies `BLOB_READ_WRITE_TOKEN`. The backend uses the Vercel Blob Python SDK when `STORAGE_PROVIDER=vercel-blob`, and uploaded documents remain private behind the authenticated library file route.
+
+Set `APP_ENV=production`, `DEBUG=false`, `MONGODB_DB_NAME=german_learning`, `UPLOAD_DIR=/tmp/uploads`, `CORS_ORIGINS=https://deutsch-lernen-ai.vercel.app`, and `STORAGE_PROVIDER=vercel-blob` in the Vercel Production environment. Keep `MONGODB_URI` and `BLOB_READ_WRITE_TOKEN` in Vercel's managed environment variables; never commit these secrets. The Atlas Free plan has a 512 MB storage limit. Vercel Blob on the Hobby plan has included usage limits; the store is suspended if those limits are exceeded rather than charging for overages.
+
+Python runtime dependencies are declared in `backend/requirements.in` and pinned with hashes in `backend/requirements.txt`. Install deployments from the lock (`pip install -r backend/requirements.txt`); update it deliberately with `pip-compile --generate-hashes --strip-extras --output-file=backend/requirements.txt backend/requirements.in`. Developer tools are listed separately in `backend/requirements-dev.txt`.
+
+The backend applies shared MongoDB fixed-window limits to authentication, uploads/link imports, and AI requests. Production error monitoring can be enabled by setting `SENTRY_DSN` (and optionally `SENTRY_ENVIRONMENT`) in Vercel. Events exclude request bodies, headers, cookies, user identifiers, and exception values; configure alert rules in the monitoring project after adding the DSN. No monitoring DSN is committed.
+
+The AI client accepts an OpenAI-compatible hosted endpoint via `AI_PROVIDER=openai-compatible`, `AI_API_BASE_URL`, `AI_API_KEY`, and `AI_MODEL`. Production currently remains `AI_PROVIDER=disabled` until the owner chooses and configures a provider. Do not configure a paid provider without explicit approval.
 
 The API requires login. Passwords are PBKDF2-SHA256 hashed, sessions are random opaque tokens stored as hashes in MongoDB, and the browser session cookie is HttpOnly, SameSite Strict, and Secure in production. All application API routes except health and account registration/login require a session. Learner data reads and writes are scoped to that authenticated account in backend queries. The first account on a database adopts the existing single-learner `default` records so current data is retained; use a new Atlas database for an empty deployment.
 

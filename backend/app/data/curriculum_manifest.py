@@ -28,7 +28,7 @@ def _exercise(lesson_id, number, kind, question, prompt, answer, explanation, op
 
 
 def _build_topic(module, spec, topic_order):
-    lesson_id = f"{module['level'].lower()}-{module['id'][-2:]}-{spec['slug']}"
+    lesson_id = spec.get("_stable_lesson_id") or f"{module['level'].lower()}-{module['id'][-2:]}-{spec['slug']}"
     examples = [{"german": de, "english": en} for de, en in spec["examples"]]
     vocabulary = [{"word": word, "article": article, "plural": plural, "meaning_en": meaning}
                   for word, article, plural, meaning in spec["vocabulary"]]
@@ -41,7 +41,8 @@ def _build_topic(module, spec, topic_order):
                   f"This claim is incorrect. {spec['reason']}", ["True", "False"], spec["correction"]),
     ]
     return {
-        "id": lesson_id, "lesson_id": lesson_id, "topic_id": f"{module['id']}-{spec['slug']}",
+        "id": lesson_id, "lesson_id": lesson_id,
+        "topic_id": spec.get("_stable_topic_id") or f"{module['id']}-{spec['slug']}",
         "module_id": module["id"], "module_title": module["title"], "title": spec["title"], "topic": spec["title"],
         "cefr_level": module["level"], "order": module["order"] * 100 + topic_order, "topic_order": topic_order,
         "estimated_minutes": 20 if module["level"] == "A1" else 25,
@@ -95,7 +96,7 @@ def get_curriculum_manifest():
         for order, spec in enumerate(module["topics"], 1):
             lesson = _build_legacy(module, spec, order) if "legacy_id" in spec else _build_topic(module, spec, order)
             lesson["module_id"], lesson["module_title"] = module["id"], module["title"]
-            lesson["topic_id"] = f"{module['id']}-{spec.get('slug', lesson['id'])}"
+            lesson["topic_id"] = spec.get("_stable_topic_id") or f"{module['id']}-{spec.get('slug', lesson['id'])}"
             lesson["topic_order"], lesson["order"] = order, module["order"] * 100 + order
             lessons.append(lesson)
             topic_ids.append(lesson["topic_id"])
@@ -597,6 +598,41 @@ A2_MODULES.append({
     "title": "A2: Manage Places, Schedules, Services, and Recent Events",
     "description": "Build independent everyday communication across BAMF fields such as authorities, work, education and childcare, banking, mobility, housing, and social appointments. Case and tense choices support the task at hand.",
     "topics": _a2_syllabus_topics,
+})
+
+
+def _distribute_extra_module(modules, extra_module_id, destinations):
+    """Fold supplementary topics into the published module set without changing their IDs."""
+    extra = next(module for module in modules if module["id"] == extra_module_id)
+    module_lookup = {module["id"]: module for module in modules if module["id"] != extra_module_id}
+    for spec in extra["topics"]:
+        destination_id = destinations[spec["slug"]]
+        spec["_stable_lesson_id"] = f"{extra['level'].lower()}-{extra['id'][-2:]}-{spec['slug']}"
+        spec["_stable_topic_id"] = f"{extra['id']}-{spec['slug']}"
+        module_lookup[destination_id]["topics"].append(spec)
+    modules.remove(extra)
+
+
+# Keep the requested six A1 and five A2 modules while retaining the authored
+# supplementary lessons and their stable IDs for existing learner progress.
+_distribute_extra_module(A1_MODULES, "a1-m07", {
+    "a1-nominative-accusative": "a1-m03",
+    "cumulative-pronoun-man": "a1-m03",
+    "a1-direct-object-actions": "a1-m04",
+    "cumulative-genitive-extension": "a1-m02",
+})
+_distribute_extra_module(A2_MODULES, "a2-m06", {
+    "cumulative-cases": "a2-m05",
+    "cumulative-demonstratives": "a2-m05",
+    "cumulative-verb-cases": "a2-m01",
+    "cumulative-fixed-prepositions": "a2-m01",
+    "cumulative-two-way-prepositions": "a2-m01",
+    "cumulative-time-prepositions": "a2-m02",
+    "cumulative-perfekt-extension": "a2-m05",
+    "a2-authorities-forms": "a2-m03",
+    "a2-job-search": "a2-m02",
+    "a2-school-childcare": "a2-m02",
+    "a2-banking-insurance": "a2-m03",
 })
 
 ALL_MODULES = [*A1_MODULES, *A2_MODULES, *B1_MODULES]
