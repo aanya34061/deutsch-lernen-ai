@@ -82,32 +82,31 @@ def test_reading_submission_request_rejects_malformed_answers():
 
 
 @pytest.mark.asyncio
-async def test_reading_api_retrieval_validation_and_saved_result(monkeypatch):
+async def test_reading_api_retrieval_validation_and_saved_result(monkeypatch, client: AsyncClient):
     database = FakeDatabase()
     monkeypatch.setattr("app.services.practice_service.get_db", lambda: database)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/v1/practice/reading?level=A1")
-        assert response.status_code == 200
-        exercise_id = response.json()[0]["id"]
+    response = await client.get("/api/v1/practice/reading?level=A1")
+    assert response.status_code == 200
+    exercise_id = response.json()[0]["id"]
 
-        detail = await client.get(f"/api/v1/practice/reading/{exercise_id}")
-        assert detail.status_code == 200
-        assert all("correct_answer" not in question for question in detail.json()["questions"])
+    detail = await client.get(f"/api/v1/practice/reading/{exercise_id}")
+    assert detail.status_code == 200
+    assert all("correct_answer" not in question for question in detail.json()["questions"])
 
-        invalid = await client.post(f"/api/v1/practice/reading/{exercise_id}/submit", json={
-            "answers": {"q1": "not an available option"}
-        })
-        assert invalid.status_code == 422
+    invalid = await client.post(f"/api/v1/practice/reading/{exercise_id}/submit", json={
+        "answers": {"q1": "not an available option"}
+    })
+    assert invalid.status_code == 422
 
-        exercise_id = "read-a1-3"
-        submitted = await client.post(f"/api/v1/practice/reading/{exercise_id}/submit", json={
-            "answers": {"q3": "rund um die Uhr"}
-        })
-        assert submitted.status_code == 200
-        assert submitted.json()["score"] == 33
-        assert database.exercise_attempts.inserted[-1]["exercise_id"] == exercise_id
-        assert database.exercise_attempts.inserted[-1]["score"] == submitted.json()["score"]
+    exercise_id = "read-a1-3"
+    submitted = await client.post(f"/api/v1/practice/reading/{exercise_id}/submit", json={
+        "answers": {"q3": "rund um die Uhr"}
+    })
+    assert submitted.status_code == 200
+    assert submitted.json()["score"] == 33
+    assert database.exercise_attempts.inserted[-1]["exercise_id"] == exercise_id
+    assert database.exercise_attempts.inserted[-1]["score"] == submitted.json()["score"]
 
 
 def test_starter_reading_content_meets_level_and_question_requirements():

@@ -21,6 +21,20 @@ services:
         value: german_learning
       - key: UPLOAD_DIR
         value: /tmp/german-uploads
+      - key: STORAGE_PROVIDER
+        value: s3
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: S3_REGION
+        value: auto
+      - key: AI_PROVIDER
+        value: disabled
       - key: CORS_ORIGINS
         fromService:
           type: web

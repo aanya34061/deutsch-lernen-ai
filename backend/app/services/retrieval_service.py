@@ -5,6 +5,7 @@ from bson import ObjectId
 
 from app.config import settings
 from app.database import get_db
+from app.security import current_user_id
 from app.services.chunking_service import ChunkingService
 from app.services.embedding_service import EmbeddingService
 
@@ -23,14 +24,17 @@ class RetrievalService:
         except Exception:
             m_id = material_id
 
-        doc = await db.materials.find_one({"_id": m_id} if isinstance(m_id, ObjectId) else {"id": str(m_id)})
+        material_query = ({"_id": m_id} if isinstance(m_id, ObjectId) else {"id": str(m_id)})
+        material_query["user_id"] = current_user_id()
+        identity = dict(material_query)
+        doc = await db.materials.find_one(material_query)
         if not doc:
             raise ValueError(f"Material '{material_id}' not found.")
 
         raw_text = doc.get("extracted_text") or ""
         if not raw_text.strip() or doc.get("status") == "failed":
             await db.materials.update_one(
-                {"_id": doc["_id"]},
+                identity,
                 {
                     "$set": {
                         "indexing_status": "not_indexed",
@@ -48,7 +52,7 @@ class RetrievalService:
 
         # Skip if already indexed with identical content hash
         if not force and existing_hash == current_hash and existing_status == "indexed":
-            chunk_count = await db.knowledge_chunks.count_documents({"material_id": str(doc["_id"])})
+            chunk_count = await db.knowledge_chunks.count_documents({"material_id": str(doc["_id"]), "user_id": current_user_id()})
             if chunk_count > 0:
                 logger.info(f"Material '{doc.get('title')}' content unchanged; skipping redundant indexing.")
                 return {
@@ -60,7 +64,7 @@ class RetrievalService:
 
         # Mark as indexing
         await db.materials.update_one(
-            {"_id": doc["_id"]},
+            identity,
             {"$set": {"indexing_status": "indexing", "indexing_error": None}}
         )
 
@@ -79,7 +83,7 @@ class RetrievalService:
 
             if not chunks:
                 await db.materials.update_one(
-                    {"_id": doc["_id"]},
+                    identity,
                     {"$set": {"indexing_status": "not_indexed", "chunks_count": 0}}
                 )
                 return {"status": "not_indexed", "chunks_count": 0, "message": "No valid chunks produced."}
@@ -93,10 +97,11 @@ class RetrievalService:
             for i, chunk in enumerate(chunks):
                 chunk["embedding"] = embeddings[i] if i < len(embeddings) else []
                 chunk["created_at"] = now_iso
+                chunk["user_id"] = current_user_id()
                 chunk_docs.append(chunk)
 
             # 3. Clean up existing chunks for this material
-            await db.knowledge_chunks.delete_many({"material_id": str(doc["_id"])})
+            await db.knowledge_chunks.delete_many({"material_id": str(doc["_id"]), "user_id": current_user_id()})
 
             # 4. Insert new chunks
             if chunk_docs:
@@ -104,7 +109,7 @@ class RetrievalService:
 
             # 5. Update material status
             await db.materials.update_one(
-                {"_id": doc["_id"]},
+                identity,
                 {
                     "$set": {
                         "indexing_status": "indexed",
@@ -127,7 +132,7 @@ class RetrievalService:
         except Exception as e:
             logger.error(f"Error indexing material {material_id}: {e}")
             await db.materials.update_one(
-                {"_id": doc["_id"]},
+                identity,
                 {
                     "$set": {
                         "indexing_status": "failed",
@@ -141,7 +146,7 @@ class RetrievalService:
     async def delete_material_chunks(cls, material_id: str) -> int:
         """Remove all knowledge chunks associated with a deleted material."""
         db = get_db()
-        result = await db.knowledge_chunks.delete_many({"material_id": str(material_id)})
+        result = await db.knowledge_chunks.delete_many({"material_id": str(material_id), "user_id": current_user_id()})
         logger.info(f"Deleted {result.deleted_count} chunks for material {material_id}")
         return result.deleted_count
 
@@ -167,7 +172,7 @@ class RetrievalService:
             return 0
 
         res = await db.knowledge_chunks.update_many(
-            {"material_id": str(material_id)},
+            {"material_id": str(material_id), "user_id": current_user_id()},
             {"$set": updates}
         )
         return res.modified_count
@@ -193,7 +198,7 @@ class RetrievalService:
 
         db = get_db()
         owner_materials = await db.materials.find(
-            {"user_id": "default", "is_seeded": {"$ne": True}, "indexing_status": "indexed"},
+            {"user_id": current_user_id(), "is_seeded": {"$ne": True}, "indexing_status": "indexed"},
             {"_id": 1},
         ).to_list(length=10000)
         owner_ids = [str(item["_id"]) for item in owner_materials]
@@ -252,12 +257,13 @@ class RetrievalService:
     async def get_index_status(cls) -> Dict[str, Any]:
         """Aggregate statistics about indexed materials and chunks."""
         db = get_db()
-        total_materials = await db.materials.count_documents({})
-        indexed_materials = await db.materials.count_documents({"indexing_status": "indexed"})
-        failed_materials = await db.materials.count_documents({"indexing_status": "failed"})
-        indexing_in_progress = await db.materials.count_documents({"indexing_status": "indexing"})
-        not_indexed = await db.materials.count_documents({"indexing_status": {"$in": ["not_indexed", None]}})
-        total_chunks = await db.knowledge_chunks.count_documents({})
+        owner_query = {"user_id": current_user_id(), "is_seeded": {"$ne": True}}
+        total_materials = await db.materials.count_documents(owner_query)
+        indexed_materials = await db.materials.count_documents({**owner_query, "indexing_status": "indexed"})
+        failed_materials = await db.materials.count_documents({**owner_query, "indexing_status": "failed"})
+        indexing_in_progress = await db.materials.count_documents({**owner_query, "indexing_status": "indexing"})
+        not_indexed = await db.materials.count_documents({**owner_query, "indexing_status": {"$in": ["not_indexed", None]}})
+        total_chunks = await db.knowledge_chunks.count_documents({"user_id": current_user_id()})
 
         return {
             "total_materials": total_materials,
@@ -273,7 +279,7 @@ class RetrievalService:
     async def rebuild_all_indexes(cls, force: bool = False) -> Dict[str, Any]:
         """Trigger re-indexing for all materials that have extracted text."""
         db = get_db()
-        cursor = db.materials.find({"extracted_text": {"$ne": None}})
+        cursor = db.materials.find({"user_id": current_user_id(), "extracted_text": {"$ne": None}})
         materials = await cursor.to_list(length=500)
 
         results = []

@@ -7,6 +7,7 @@ from typing import Optional, List, Dict, Any
 from bson import ObjectId
 
 from app.database import get_db
+from app.security import current_user_id
 from app.models.practice import (
     ReadingExerciseBase,
     ReadingExerciseLearnerView,
@@ -176,7 +177,7 @@ class PracticeService:
         try:
             attempt_doc = {
                 "exercise_id": exercise_id,
-                "user_id": "default",
+                "user_id": current_user_id(),
                 "is_seeded": False,
                 "skill": "reading",
                 "score": score,
@@ -208,9 +209,10 @@ class PracticeService:
         cefr_level: Optional[str] = None,
         category: Optional[str] = None,
         search: Optional[str] = None,
-        user_id: str = "default",
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """List maintained external resources with real per-learner completion state."""
+        user_id = user_id or current_user_id()
         resources = LISTENING_RESOURCE_CATALOG
         if cefr_level and cefr_level.upper() in {"A1", "A2", "B1"}:
             resources = [item for item in resources if item["cefr_level"] == cefr_level.upper()]
@@ -230,8 +232,9 @@ class PracticeService:
         return [{**item, "completed_at": completions.get(item["id"])} for item in resources]
 
     @classmethod
-    async def complete_listening_resource(cls, resource_id: str, user_id: str = "default") -> Dict[str, Any]:
+    async def complete_listening_resource(cls, resource_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
         """Record the learner's explicit manual completion of an external resource."""
+        user_id = user_id or current_user_id()
         resource = next((item for item in LISTENING_RESOURCE_CATALOG if item["id"] == resource_id), None)
         if not resource:
             raise ValueError(f"Listening resource '{resource_id}' not found.")
@@ -378,7 +381,7 @@ class PracticeService:
         try:
             attempt_doc = {
                 "exercise_id": exercise_id,
-                "user_id": "default",
+                "user_id": current_user_id(),
                 "is_seeded": False,
                 "skill": "listening",
                 "score": score,
@@ -435,8 +438,9 @@ class PracticeService:
         return WritingPromptBase(**doc) if doc else None
 
     @classmethod
-    async def save_writing_draft(cls, prompt_id: str, content: str, user_id: str = "default") -> WritingDraftResponse:
+    async def save_writing_draft(cls, prompt_id: str, content: str, user_id: Optional[str] = None) -> WritingDraftResponse:
         """Save or update an unfinished writing draft in MongoDB."""
+        user_id = user_id or current_user_id()
         db = get_db()
         now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -453,8 +457,9 @@ class PracticeService:
             return WritingDraftResponse(id=str(res.inserted_id), prompt_id=prompt_id, content=content, updated_at=now_iso)
 
     @classmethod
-    async def get_writing_draft(cls, prompt_id: str, user_id: str = "default") -> Optional[WritingDraftResponse]:
+    async def get_writing_draft(cls, prompt_id: str, user_id: Optional[str] = None) -> Optional[WritingDraftResponse]:
         """Retrieve a saved writing draft for a prompt."""
+        user_id = user_id or current_user_id()
         db = get_db()
         doc = await db.writing_drafts.find_one({"prompt_id": prompt_id, "user_id": user_id})
         if not doc:
@@ -467,7 +472,7 @@ class PracticeService:
         db = get_db()
         try:
             oid = ObjectId(draft_id) if ObjectId.is_valid(draft_id) else draft_id
-            res = await db.writing_drafts.delete_one({"_id": oid} if isinstance(oid, ObjectId) else {"id": str(oid)})
+            res = await db.writing_drafts.delete_one({"_id": oid, "user_id": current_user_id()} if isinstance(oid, ObjectId) else {"id": str(oid), "user_id": current_user_id()})
             return res.deleted_count > 0
         except Exception:
             return False
@@ -545,12 +550,13 @@ class PracticeService:
         content: str,
         cefr_level: str = "A1",
         time_spent_seconds: Optional[int] = None,
-        user_id: str = "default"
+        user_id: Optional[str] = None
     ) -> WritingEvaluationResponse:
         """
         Evaluate writing response using Ollama local AI when available,
         falling back to deterministic checks if Ollama is offline.
         """
+        user_id = user_id or current_user_id()
         clean_text = content.strip()
         if not clean_text:
             raise ValueError("Writing submission cannot be empty.")
@@ -669,8 +675,9 @@ class PracticeService:
         return response_model
 
     @classmethod
-    async def list_writing_submissions(cls, prompt_id: Optional[str] = None, user_id: str = "default", limit: int = 20) -> List[WritingEvaluationResponse]:
+    async def list_writing_submissions(cls, prompt_id: Optional[str] = None, user_id: Optional[str] = None, limit: int = 20) -> List[WritingEvaluationResponse]:
         """Fetch historical writing submissions."""
+        user_id = user_id or current_user_id()
         db = get_db()
         query: Dict[str, Any] = {"user_id": user_id}
         if prompt_id:
@@ -707,9 +714,10 @@ class PracticeService:
         scenario_id: Optional[str] = None,
         cefr_level: str = "A1",
         topic: Optional[str] = None,
-        user_id: str = "default"
+        user_id: Optional[str] = None
     ) -> SpeakingMessageResponse:
         """Start a new speaking practice conversation session."""
+        user_id = user_id or current_user_id()
         db = get_db()
         scenario = None
         if scenario_id:
@@ -765,15 +773,16 @@ class PracticeService:
         session_id: str,
         message: str,
         audio_url: Optional[str] = None,
-        user_id: str = "default"
+        user_id: Optional[str] = None
     ) -> SpeakingMessageResponse:
         """Send a learner spoken message and receive next tutor turn with feedback."""
+        user_id = user_id or current_user_id()
         clean_msg = message.strip()
         if not clean_msg:
             raise ValueError("Message cannot be empty.")
 
         db = get_db()
-        session = await db.speaking_sessions.find_one({"session_id": session_id})
+        session = await db.speaking_sessions.find_one({"session_id": session_id, "user_id": user_id})
         if not session:
             raise ValueError(f"Speaking session '{session_id}' not found.")
 
@@ -854,7 +863,7 @@ class PracticeService:
 
         turn_count = session.get("turn_count", 1) + 1
         await db.speaking_sessions.update_one(
-            {"_id": session["_id"]},
+            {"_id": session["_id"], "user_id": user_id},
             {
                 "$push": {"messages": {"$each": [user_turn, assistant_turn]}},
                 "$set": {"updated_at": now_iso, "turn_count": turn_count}
@@ -875,7 +884,7 @@ class PracticeService:
     async def get_speaking_session(cls, session_id: str) -> Optional[Dict[str, Any]]:
         """Get full conversation history of a speaking session."""
         db = get_db()
-        doc = await db.speaking_sessions.find_one({"session_id": session_id})
+        doc = await db.speaking_sessions.find_one({"session_id": session_id, "user_id": current_user_id()})
         if not doc:
             return None
         doc["_id"] = str(doc["_id"])
@@ -884,8 +893,9 @@ class PracticeService:
     # ==================== 5. Progress & Analytics ====================
 
     @classmethod
-    async def get_practice_progress(cls, user_id: str = "default") -> PracticeProgressResponse:
+    async def get_practice_progress(cls, user_id: Optional[str] = None) -> PracticeProgressResponse:
         """Calculate real aggregated practice progress across all 4 language skills."""
+        user_id = user_id or current_user_id()
         db = get_db()
 
         # Query all attempts

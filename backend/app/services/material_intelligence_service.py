@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from bson import ObjectId
 
 from app.database import get_db
+from app.security import current_user_id
 from app.services.ollama_service import OllamaService
 from app.services.retrieval_service import RetrievalService
 
@@ -112,7 +113,7 @@ def _source_sentence_questions(
                 "acceptable_alternatives": [],
                 "explanation_en": "The source sentence is shown with one word hidden.",
                 "correct_sentence_de": sentence, "difficulty": "Easy",
-                "user_id": "default", "is_seeded": False,
+                "user_id": current_user_id(), "is_seeded": False,
                 "origin": "source_generated", "source_type": "uploaded_material",
                 "source_ref": section["source_ref"], "source_id": section["source_id"],
                 "source_evidence": sentence, "source_excerpt": section["text"][:500],
@@ -139,7 +140,8 @@ class MaterialIntelligenceService:
         db = get_db()
         oid = ObjectId(material_id) if ObjectId.is_valid(material_id) else material_id
         identity = {"_id": oid} if isinstance(oid, ObjectId) else {"id": str(oid)}
-        material = await db.materials.find_one({**identity, "user_id": "default", "is_seeded": {"$ne": True}})
+        identity["user_id"] = current_user_id()
+        material = await db.materials.find_one({**identity, "user_id": current_user_id(), "is_seeded": {"$ne": True}})
         if not material:
             raise ValueError("Material not found in your Library.")
         if material.get("status") == "failed" or not (material.get("extracted_text") or "").strip():
@@ -224,14 +226,14 @@ class MaterialIntelligenceService:
 
             current_note = await db.study_notes.find_one({
                 "material_id": str(material["_id"]), "content_hash": content_hash,
-                "user_id": "default", "is_current": True,
+                "user_id": current_user_id(), "is_current": True,
             })
             if not current_note:
                 notes = await cls._generate_notes(source_context, level, analysis, valid_ids)
                 notes["source_references"] = {section["source_id"]: section["source_ref"] for section in sections}
                 await cls._save_note(db, material, content_hash, notes, version=1)
                 await db.materials.update_one({**identity}, {"$set": {
-                    "notes_count": await db.study_notes.count_documents({"material_id": str(material["_id"]), "user_id": "default", "is_current": True})
+                    "notes_count": await db.study_notes.count_documents({"material_id": str(material["_id"]), "user_id": current_user_id(), "is_current": True})
                 }})
 
             await db.materials.update_one({**identity}, {"$set": {
@@ -262,7 +264,7 @@ class MaterialIntelligenceService:
                         question_count = len(questions)
                 await db.materials.update_one({**identity}, {"$set": {"questions_count": question_count}})
 
-            notes_count = await db.study_notes.count_documents({"material_id": str(material["_id"]), "user_id": "default", "is_current": True})
+            notes_count = await db.study_notes.count_documents({"material_id": str(material["_id"]), "user_id": current_user_id(), "is_current": True})
             question_count = await db.exercises.count_documents({
                 "material_id": str(material["_id"]), "content_hash": content_hash,
                 "origin": {"$in": ["ai_generated", "source_generated"]},
@@ -386,7 +388,7 @@ class MaterialIntelligenceService:
                 "correct_answer": answer, "acceptable_alternatives": item.get("acceptable_alternatives", []) if isinstance(item.get("acceptable_alternatives"), list) else [],
                 "explanation_en": str(item.get("explanation_en") or "The source states this directly.")[:1000],
                 "correct_sentence_de": item.get("correct_sentence_de"), "difficulty": difficulty,
-                "user_id": "default", "is_seeded": False,
+                "user_id": current_user_id(), "is_seeded": False,
                 "origin": "ai_generated", "source_type": "uploaded_material",
                 "source_ref": ref["source_ref"], "source_id": source_id, "source_evidence": evidence,
                 "source_excerpt": ref["text"][:500], "created_at": _now(),
@@ -396,7 +398,7 @@ class MaterialIntelligenceService:
     @staticmethod
     async def _save_note(db, material: Dict[str, Any], content_hash: str, content: Dict[str, Any], version: int, parent_id: Optional[str] = None) -> Dict[str, Any]:
         doc = {
-            "material_id": str(material["_id"]), "user_id": "default",
+            "material_id": str(material["_id"]), "user_id": current_user_id(),
             "title": f"{(material.get('analysis') or {}).get('topic') or material.get('topic') or 'German'} — Study Notes",
             "cefr_level": material.get("cefr_level", "Unknown"), "topic": material.get("topic", "General"),
             "content": content, "content_hash": content_hash, "version": version, "parent_id": parent_id,
@@ -408,18 +410,18 @@ class MaterialIntelligenceService:
 
     @classmethod
     async def regenerate_notes(cls, material_id: str, previous_note: Dict[str, Any]) -> Dict[str, Any]:
-        material = await get_db().materials.find_one({"_id": ObjectId(material_id), "user_id": "default", "is_seeded": {"$ne": True}})
+        material = await get_db().materials.find_one({"_id": ObjectId(material_id), "user_id": current_user_id(), "is_seeded": {"$ne": True}})
         if not material:
             raise ValueError("Material not found in your Library.")
         sections = _sections(material.get("extracted_text") or "")
         source = "\n\n".join(f"[{x['source_id']} | {x['source_ref']}]\n{x['text']}" for x in sections)
         content = await cls._generate_notes(source, material.get("cefr_level", "Unknown"), material.get("analysis") or {}, {x["source_id"] for x in sections})
         content["source_references"] = {section["source_id"]: section["source_ref"] for section in sections}
-        await get_db().study_notes.update_one({"_id": previous_note["_id"]}, {"$set": {"is_current": False}})
+        await get_db().study_notes.update_one({"_id": previous_note["_id"], "user_id": current_user_id()}, {"$set": {"is_current": False}})
         content_hash = material.get("content_hash") or hashlib.sha256((material.get("extracted_text") or "").encode("utf-8")).hexdigest()
         new_note = await cls._save_note(get_db(), material, content_hash, content, int(previous_note.get("version", 1)) + 1, str(previous_note["_id"]))
-        await get_db().materials.update_one({"_id": material["_id"]}, {"$set": {
-            "notes_count": await get_db().study_notes.count_documents({"material_id": str(material["_id"]), "user_id": "default", "is_current": True})
+        await get_db().materials.update_one({"_id": material["_id"], "user_id": current_user_id()}, {"$set": {
+            "notes_count": await get_db().study_notes.count_documents({"material_id": str(material["_id"]), "user_id": current_user_id(), "is_current": True})
         }})
         return new_note
 

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from bson import ObjectId
 
 from app.database import get_db
+from app.security import current_user_id
 from app.models.exercise import ExerciseLearnerView
 from app.services.material_intelligence_service import MaterialIntelligenceService
 
@@ -77,13 +78,13 @@ class StudyService:
     @classmethod
     async def list_notes(cls, material_id: Optional[str] = None) -> List[Dict[str, Any]]:
         db = get_db()
-        query: Dict[str, Any] = {"user_id": "default", "is_current": True}
+        query: Dict[str, Any] = {"user_id": current_user_id(), "is_current": True}
         if material_id:
             query["material_id"] = material_id
         notes = await db.study_notes.find(query).sort("updated_at", -1).to_list(length=500)
         result = []
         for note in notes:
-            material = await db.materials.find_one({"_id": ObjectId(note["material_id"]), "user_id": "default", "is_seeded": {"$ne": True}}) if ObjectId.is_valid(note["material_id"]) else None
+            material = await db.materials.find_one({"_id": ObjectId(note["material_id"]), "user_id": current_user_id(), "is_seeded": {"$ne": True}}) if ObjectId.is_valid(note["material_id"]) else None
             if not material:
                 continue
             result.append(cls._note_view(note, material))
@@ -107,10 +108,10 @@ class StudyService:
 
     @classmethod
     async def get_note(cls, note_id: str) -> Dict[str, Any]:
-        note = await get_db().study_notes.find_one({**_id_query(note_id), "user_id": "default"})
+        note = await get_db().study_notes.find_one({**_id_query(note_id), "user_id": current_user_id()})
         if not note:
             raise ValueError("Study notes not found.")
-        material = await get_db().materials.find_one({"_id": ObjectId(note["material_id"]), "user_id": "default", "is_seeded": {"$ne": True}})
+        material = await get_db().materials.find_one({"_id": ObjectId(note["material_id"]), "user_id": current_user_id(), "is_seeded": {"$ne": True}})
         if not material:
             raise ValueError("The source material is no longer available.")
         return cls._note_view(note, material)
@@ -121,7 +122,7 @@ class StudyService:
         if not text:
             raise ValueError("Notes cannot be empty.")
         result = await get_db().study_notes.update_one(
-            {**_id_query(note_id), "user_id": "default"},
+            {**_id_query(note_id), "user_id": current_user_id()},
             {"$set": {"manual_markdown": text, "is_manually_edited": True, "updated_at": datetime.now(timezone.utc).isoformat()}},
         )
         if not result.matched_count:
@@ -130,7 +131,7 @@ class StudyService:
 
     @classmethod
     async def regenerate_notes(cls, note_id: str) -> Dict[str, Any]:
-        previous = await get_db().study_notes.find_one({**_id_query(note_id), "user_id": "default"})
+        previous = await get_db().study_notes.find_one({**_id_query(note_id), "user_id": current_user_id()})
         if not previous:
             raise ValueError("Study notes not found.")
         new_note = await MaterialIntelligenceService.regenerate_notes(previous["material_id"], previous)
@@ -139,15 +140,15 @@ class StudyService:
     @classmethod
     async def delete_note(cls, note_id: str) -> None:
         db = get_db()
-        note = await db.study_notes.find_one({**_id_query(note_id), "user_id": "default"})
+        note = await db.study_notes.find_one({**_id_query(note_id), "user_id": current_user_id()})
         if not note:
             raise ValueError("Study notes not found.")
-        result = await db.study_notes.delete_one({"_id": note["_id"], "user_id": "default"})
+        result = await db.study_notes.delete_one({"_id": note["_id"], "user_id": current_user_id()})
         if not result.deleted_count:
             raise ValueError("Study notes not found.")
-        count = await db.study_notes.count_documents({"material_id": note["material_id"], "user_id": "default", "is_current": True})
+        count = await db.study_notes.count_documents({"material_id": note["material_id"], "user_id": current_user_id(), "is_current": True})
         if ObjectId.is_valid(note["material_id"]):
-            await db.materials.update_one({"_id": ObjectId(note["material_id"]), "user_id": "default"}, {"$set": {"notes_count": count}})
+            await db.materials.update_one({"_id": ObjectId(note["material_id"]), "user_id": current_user_id()}, {"$set": {"notes_count": count}})
 
     @classmethod
     async def list_questions(
@@ -162,7 +163,7 @@ class StudyService:
     ) -> List[Dict[str, Any]]:
         db = get_db()
         query: Dict[str, Any] = {
-            "user_id": "default", "is_seeded": {"$ne": True},
+            "user_id": current_user_id(), "is_seeded": {"$ne": True},
             "origin": {"$in": ["ai_generated", "source_generated"]},
         }
         if material_id:
@@ -178,7 +179,7 @@ class StudyService:
         if skill:
             query["skill"] = skill
         if incorrect_only:
-            attempts = await db.exercise_attempts.find({"user_id": "default", "is_seeded": False}).sort("timestamp", -1).to_list(length=10000)
+            attempts = await db.exercise_attempts.find({"user_id": current_user_id(), "is_seeded": False}).sort("timestamp", -1).to_list(length=10000)
             latest = {}
             for attempt in attempts:
                 latest.setdefault(attempt.get("exercise_id"), attempt.get("is_correct"))
@@ -187,7 +188,7 @@ class StudyService:
         docs = await db.exercises.find(query).sort("created_at", -1).to_list(length=1000)
         result = []
         for doc in docs:
-            material = await db.materials.find_one({"_id": ObjectId(doc["material_id"]), "user_id": "default", "is_seeded": {"$ne": True}}) if ObjectId.is_valid(str(doc.get("material_id", ""))) else None
+            material = await db.materials.find_one({"_id": ObjectId(doc["material_id"]), "user_id": current_user_id(), "is_seeded": {"$ne": True}}) if ObjectId.is_valid(str(doc.get("material_id", ""))) else None
             if not material:
                 continue
             item = ExerciseLearnerView(**doc).model_dump()

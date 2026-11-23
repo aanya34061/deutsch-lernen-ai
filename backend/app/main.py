@@ -1,23 +1,28 @@
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pymongo.errors import PyMongoError
 from app.config import settings
 from app.database import connect_to_mongo, close_mongo_connection
-from app.routers import health, dashboard, levels, library, lessons, exercises, vocabulary, tutor, practice, study
+from app.routers import auth, health, dashboard, levels, library, lessons, exercises, vocabulary, tutor, practice, study
+from app.security import authenticate_request, reset_request_user
+from app.services.storage_service import ObjectStorage
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger("german_app")
+API_V1_PREFIX = "/api/v1"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting German Learning App API...")
+    if settings.APP_ENV.lower() == "production" and not ObjectStorage.configured():
+        raise RuntimeError("Production requires configured S3-compatible storage credentials.")
     await connect_to_mongo()
     yield
     # Shutdown
@@ -53,8 +58,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def learner_session_middleware(request: Request, call_next):
+    if request.url.path.startswith(API_V1_PREFIX) and request.method != "OPTIONS":
+        origin = request.headers.get("origin")
+        if origin and origin.rstrip("/") not in settings.cors_origin_list:
+            return JSONResponse(status_code=403, content={"detail": "Request origin is not allowed."})
+        try:
+            _, user_id_token, user_token = await authenticate_request(request)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers)
+        try:
+            return await call_next(request)
+        finally:
+            reset_request_user((user_id_token, user_token))
+    return await call_next(request)
+
 # Versioned API Router
-API_V1_PREFIX = "/api/v1"
+app.include_router(auth.router, prefix=API_V1_PREFIX)
 app.include_router(health.router, prefix=API_V1_PREFIX)
 app.include_router(dashboard.router, prefix=API_V1_PREFIX)
 app.include_router(levels.router, prefix=API_V1_PREFIX)

@@ -3,6 +3,7 @@ import re
 import uuid
 import logging
 import hashlib
+import mimetypes
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -12,6 +13,7 @@ from fastapi import UploadFile, HTTPException, status
 
 from app.config import settings
 from app.database import get_db
+from app.security import current_user_id
 from app.models.material import (
     MaterialResponse,
     MaterialUpdate,
@@ -21,6 +23,7 @@ from app.models.material import (
     SUPPORTED_TOPICS,
 )
 from app.services.extractor_service import ExtractorService
+from app.services.storage_service import ObjectStorage, StorageConfigurationError
 
 logger = logging.getLogger("german_app.library")
 
@@ -105,6 +108,15 @@ class LibraryService:
             )
 
         file_type = ALLOWED_EXTENSIONS[ext]
+        supplied_type = (file.content_type or "").split(";")[0].strip().lower()
+        allowed_types = {
+            "pdf": {"application/pdf"},
+            "docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/zip"},
+            "txt": {"text/plain"},
+            "image": {"image/jpeg", "image/png", "image/webp", "image/bmp", "image/tiff", "image/gif"},
+        }
+        if supplied_type and supplied_type != "application/octet-stream" and supplied_type not in allowed_types[file_type]:
+            raise HTTPException(status_code=400, detail="The uploaded file type does not match its filename.")
         level_upper = cefr_level.title() if cefr_level and cefr_level.lower() == "unknown" else (cefr_level.upper() if cefr_level else "Unknown")
         if level_upper not in SUPPORTED_CEFR_LEVELS:
             level_upper = "Unknown"
@@ -162,19 +174,68 @@ class LibraryService:
 
         material_title = title.strip() if title and title.strip() else Path(safe_original_name).stem
 
-        # 5. Save metadata in MongoDB
+        # 5. Store file content outside the API host when object storage is enabled.
         now_iso = datetime.now(timezone.utc).isoformat()
+        db = get_db()
+        owner_id = current_user_id()
+        upload_hash = content_hasher.hexdigest()
+        duplicate = await db.materials.find_one({"user_id": owner_id, "upload_hash": upload_hash, "is_seeded": {"$ne": True}})
+        if duplicate:
+            destination_path.unlink(missing_ok=True)
+            if duplicate.get("status") == "failed":
+                retry_fields = {key: value for key, value in {
+                    "extracted_text": extracted_text,
+                    "summary": summary_text,
+                    "status": "ready" if has_text and not error_msg else "failed",
+                    "error_message": error_msg,
+                    "processing_error": error_msg,
+                    "chunks_count": 1 if extracted_text and not error_msg else 0,
+                    "updated_at": now_iso,
+                }.items()}
+                retry_fields.update({"processing_status": "uploaded", "indexing_status": "not_indexed", "indexing_error": None})
+                await db.materials.update_one({"_id": duplicate["_id"], "user_id": owner_id}, {"$set": retry_fields})
+                duplicate.update(retry_fields)
+                if extracted_text and not error_msg:
+                    try:
+                        from app.services.retrieval_service import RetrievalService
+                        indexed = await RetrievalService.index_material(str(duplicate["_id"]))
+                        retry_fields.update({
+                            "indexing_status": indexed.get("status", "failed"),
+                            "indexing_error": indexed.get("error"),
+                            "chunks_count": indexed.get("chunks_count", 0),
+                        })
+                        await db.materials.update_one({"_id": duplicate["_id"], "user_id": owner_id}, {"$set": retry_fields})
+                        duplicate.update(retry_fields)
+                    except Exception as index_error:
+                        logger.warning("Retry indexing failed for %s (%s).", duplicate["_id"], type(index_error).__name__)
+            return MaterialResponse(**str_id(duplicate))
+
+        use_object_storage = settings.STORAGE_PROVIDER.strip().lower() in {"s3", "r2", "s3-compatible"}
+        material_oid = ObjectId()
+        storage_key = f"{owner_id}/{material_oid}/{storage_filename}" if use_object_storage else None
+        if use_object_storage:
+            if not ObjectStorage.configured():
+                destination_path.unlink(missing_ok=True)
+                raise HTTPException(status_code=503, detail="Persistent file storage is not configured. Uploads are temporarily unavailable.")
+            try:
+                await ObjectStorage.upload_file(destination_path, storage_key, safe_original_name)
+            except Exception as exc:
+                destination_path.unlink(missing_ok=True)
+                raise HTTPException(status_code=503, detail="Persistent file storage could not save this upload.") from exc
+
         material_doc = {
             "title": material_title,
             "original_filename": safe_original_name,
             "storage_filename": storage_filename,
-            "file_path": str(destination_path),
+            "file_path": None if use_object_storage else str(destination_path),
+            "storage_key": storage_key,
+            "storage_provider": "s3" if use_object_storage else "local",
             "file_type": file_type,
             "file_size": total_size,
             "source_type": "upload",
             "is_seeded": False,
-            "user_id": "default",
-            "upload_hash": content_hasher.hexdigest(),
+            "user_id": owner_id,
+            "upload_hash": upload_hash,
             "source_url": None,
             "cefr_level": level_upper,
             "topic": topic.strip() if topic and topic.strip() else "General",
@@ -191,31 +252,7 @@ class LibraryService:
             "updated_at": now_iso
         }
 
-        db = get_db()
-        duplicate = await db.materials.find_one({"user_id": "default", "upload_hash": material_doc["upload_hash"], "is_seeded": {"$ne": True}})
-        if duplicate:
-            if duplicate.get("status") == "failed":
-                retry_fields = {key: material_doc[key] for key in (
-                    "extracted_text", "summary", "status", "error_message", "chunks_count", "updated_at"
-                )}
-                retry_fields["indexing_status"] = "not_indexed"
-                retry_fields["indexing_error"] = None
-                await db.materials.update_one({"_id": duplicate["_id"]}, {"$set": retry_fields})
-                if extracted_text and not error_msg:
-                    try:
-                        from app.services.retrieval_service import RetrievalService
-                        index_res = await RetrievalService.index_material(str(duplicate["_id"]))
-                        retry_fields["indexing_status"] = index_res.get("status", "failed")
-                        retry_fields["indexing_error"] = index_res.get("error")
-                        retry_fields["chunks_count"] = index_res.get("chunks_count", 0)
-                    except Exception as idx_err:
-                        retry_fields["indexing_status"] = "failed"
-                        retry_fields["indexing_error"] = str(idx_err)
-                        logger.warning("Retry indexing failed for %s: %s", duplicate["_id"], idx_err)
-                    await db.materials.update_one({"_id": duplicate["_id"]}, {"$set": retry_fields})
-                duplicate.update(retry_fields)
-            destination_path.unlink(missing_ok=True)
-            return MaterialResponse(**str_id(duplicate))
+        material_doc["_id"] = material_oid
         try:
             result = await db.materials.insert_one(material_doc)
         except Exception:
@@ -224,8 +261,15 @@ class LibraryService:
                 destination_path.unlink(missing_ok=True)
             except OSError as cleanup_err:
                 logger.warning("Could not remove unrecorded upload file: %s", cleanup_err)
+            if storage_key:
+                try:
+                    await ObjectStorage.delete_file(storage_key)
+                except Exception:
+                    logger.error("Could not remove an unrecorded object-storage upload.")
             raise
         material_id_str = str(result.inserted_id)
+        if use_object_storage:
+            destination_path.unlink(missing_ok=True)
         material_doc["_id"] = material_id_str
 
         return MaterialResponse(**material_doc)
@@ -275,7 +319,7 @@ class LibraryService:
             "file_size": 0,
             "source_type": "link",
             "is_seeded": False,
-            "user_id": "default",
+            "user_id": current_user_id(),
             "source_url": url,
             "cefr_level": level_upper,
             "topic": link_data.topic.strip() if link_data.topic and link_data.topic.strip() else "General",
@@ -293,7 +337,7 @@ class LibraryService:
         }
 
         db = get_db()
-        duplicate = await db.materials.find_one({"user_id": "default", "source_url": url, "is_seeded": {"$ne": True}})
+        duplicate = await db.materials.find_one({"user_id": current_user_id(), "source_url": url, "is_seeded": {"$ne": True}})
         if duplicate:
             if duplicate.get("status") == "failed":
                 retry_fields = {key: material_doc[key] for key in (
@@ -301,7 +345,7 @@ class LibraryService:
                 )}
                 retry_fields["indexing_status"] = "not_indexed"
                 retry_fields["indexing_error"] = None
-                await db.materials.update_one({"_id": duplicate["_id"]}, {"$set": retry_fields})
+                await db.materials.update_one({"_id": duplicate["_id"], "user_id": current_user_id()}, {"$set": retry_fields})
                 if extracted_text and not error_msg:
                     try:
                         from app.services.retrieval_service import RetrievalService
@@ -313,7 +357,7 @@ class LibraryService:
                         retry_fields["indexing_status"] = "failed"
                         retry_fields["indexing_error"] = str(idx_err)
                         logger.warning("Retry indexing failed for %s: %s", duplicate["_id"], idx_err)
-                    await db.materials.update_one({"_id": duplicate["_id"]}, {"$set": retry_fields})
+                    await db.materials.update_one({"_id": duplicate["_id"], "user_id": current_user_id()}, {"$set": retry_fields})
                 duplicate.update(retry_fields)
             return MaterialResponse(**str_id(duplicate))
         result = await db.materials.insert_one(material_doc)
@@ -335,7 +379,7 @@ class LibraryService:
         """Query materials with optional filters, search, and pagination."""
         db = get_db()
         query: Dict[str, Any] = {
-            "user_id": "default",
+            "user_id": current_user_id(),
             "is_seeded": {"$ne": True},
         }
 
@@ -378,7 +422,7 @@ class LibraryService:
             )
 
         db = get_db()
-        doc = await db.materials.find_one({"_id": obj_id, "user_id": "default", "is_seeded": {"$ne": True}})
+        doc = await db.materials.find_one({"_id": obj_id, "user_id": current_user_id(), "is_seeded": {"$ne": True}})
         if not doc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -398,7 +442,7 @@ class LibraryService:
             )
 
         db = get_db()
-        doc = await db.materials.find_one({"_id": obj_id, "user_id": "default", "is_seeded": {"$ne": True}})
+        doc = await db.materials.find_one({"_id": obj_id, "user_id": current_user_id(), "is_seeded": {"$ne": True}})
         if not doc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -428,7 +472,7 @@ class LibraryService:
 
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-        await db.materials.update_one({"_id": obj_id}, {"$set": updates})
+        await db.materials.update_one({"_id": obj_id, "user_id": current_user_id(), "is_seeded": {"$ne": True}}, {"$set": updates})
 
         # Phase 4: Synchronize chunk metadata if level, topic or title changed
         try:
@@ -442,7 +486,7 @@ class LibraryService:
         except Exception as chunk_err:
             logger.warning(f"Could not update chunks metadata: {chunk_err}")
 
-        updated_doc = await db.materials.find_one({"_id": obj_id})
+        updated_doc = await db.materials.find_one({"_id": obj_id, "user_id": current_user_id(), "is_seeded": {"$ne": True}})
         return MaterialResponse(**str_id(updated_doc))
 
     @staticmethod
@@ -457,12 +501,16 @@ class LibraryService:
             )
 
         db = get_db()
-        doc = await db.materials.find_one({"_id": obj_id, "user_id": "default", "is_seeded": {"$ne": True}})
+        doc = await db.materials.find_one({"_id": obj_id, "user_id": current_user_id(), "is_seeded": {"$ne": True}})
         if not doc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Material with ID {material_id} not found."
             )
+
+        storage_key = doc.get("storage_key")
+        if storage_key:
+            await ObjectStorage.delete_file(storage_key)
 
         # Remove local file if present and safe
         storage_filename = doc.get("storage_filename")
@@ -477,11 +525,11 @@ class LibraryService:
                     logger.warning(f"Could not delete local file {file_path}: {file_err}")
 
         # Delete database record
-        await db.materials.delete_one({"_id": obj_id})
+        await db.materials.delete_one({"_id": obj_id, "user_id": current_user_id(), "is_seeded": {"$ne": True}})
 
         # Remove generated study artifacts so they cannot outlive their source.
-        await db.study_notes.delete_many({"material_id": material_id, "user_id": "default"})
-        await db.exercises.delete_many({"material_id": material_id, "user_id": "default", "origin": "ai_generated"})
+        await db.study_notes.delete_many({"material_id": material_id, "user_id": current_user_id()})
+        await db.exercises.delete_many({"material_id": material_id, "user_id": current_user_id(), "origin": "ai_generated"})
 
         # Phase 4: Clean up indexed chunks in knowledge_chunks collection
         try:
@@ -508,12 +556,19 @@ class LibraryService:
             )
 
         db = get_db()
-        doc = await db.materials.find_one({"_id": obj_id, "user_id": "default", "is_seeded": {"$ne": True}})
+        doc = await db.materials.find_one({"_id": obj_id, "user_id": current_user_id(), "is_seeded": {"$ne": True}})
         if not doc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Material with ID {material_id} not found."
             )
+
+        storage_key = doc.get("storage_key")
+        original_name = doc.get("original_filename") or doc.get("storage_filename") or "study-material"
+        if storage_key:
+            file_path = await ObjectStorage.download_to_temp(storage_key)
+            media_type = mimetypes.guess_type(original_name)[0] or "application/octet-stream"
+            return file_path, original_name, media_type
 
         storage_filename = doc.get("storage_filename")
         if not storage_filename:
@@ -547,3 +602,21 @@ class LibraryService:
         }
         media_type = media_types.get(ext, "application/octet-stream")
         return file_path, original_name, media_type
+
+    @staticmethod
+    async def get_material_file_download_url(material_id: str) -> tuple[str, str]:
+        """Return a short-lived signed URL only after checking the material owner."""
+        try:
+            obj_id = ObjectId(material_id)
+        except (InvalidId, ValueError):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid material ID format.")
+        doc = await get_db().materials.find_one({
+            "_id": obj_id, "user_id": current_user_id(), "is_seeded": {"$ne": True}
+        })
+        if not doc:
+            raise HTTPException(status_code=404, detail="Material not found.")
+        storage_key = doc.get("storage_key")
+        if not storage_key:
+            raise HTTPException(status_code=400, detail="This file is stored locally; use the authenticated file endpoint.")
+        original_name = doc.get("original_filename") or "study-material"
+        return await ObjectStorage.presigned_download_url(storage_key, original_name), original_name

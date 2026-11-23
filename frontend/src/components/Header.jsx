@@ -7,7 +7,8 @@ export default function Header({
   healthStatus,
   onRefresh,
   loading,
-  onToggleMobileSidebar
+  onToggleMobileSidebar,
+  onLogout
 }) {
   const isMongoConnected = healthStatus?.database?.status === 'connected';
 
@@ -63,6 +64,9 @@ export default function Header({
           >
             <i className={`bi bi-arrow-clockwise ${loading ? 'spin' : ''}`}></i>
             <span className="d-none d-lg-inline">Sync</span>
+          </button>
+          <button className="btn btn-sm btn-outline-secondary" onClick={onLogout} title="Log out" aria-label="Log out">
+            <i className="bi bi-box-arrow-right"></i>
           </button>
         </div>
       </div>

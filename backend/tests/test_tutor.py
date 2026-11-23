@@ -14,6 +14,7 @@ from app.services.ollama_service import (
 )
 from app.services.ai_exercise_service import AiExerciseService
 from app.services.tutor_service import TutorService
+from app.security import _current_user_id
 
 
 def test_location_question_is_answered_from_exact_retrieved_sentence():
@@ -85,6 +86,7 @@ async def test_content_hash_prevents_duplicate_embedding():
     db = get_db()
     mat_doc = {
         "title": "Unchanged Notes",
+        "user_id": "default",
         "file_type": "txt",
         "source_type": "upload",
         "cefr_level": "A1",
@@ -161,18 +163,22 @@ async def test_retrieval_relevance_and_selected_source_filtering():
 async def test_deleted_material_cleans_up_chunks(client):
     """Verify that deleting a material removes all its indexed knowledge chunks."""
     db = get_db()
-    mat = await db.materials.insert_one({
+    owner_token = _current_user_id.set(client.user_id)
+    try:
+        mat = await db.materials.insert_one({
         "title": "Temporary Study Note",
-        "user_id": "default",
+        "user_id": client.user_id,
         "file_type": "txt",
         "source_type": "upload",
         "cefr_level": "A1",
         "topic": "General",
         "status": "ready",
         "extracted_text": "Guten Morgen! Wie geht es Ihnen? Danke, gut."
-    })
-    mat_id = str(mat.inserted_id)
-    await RetrievalService.index_material(mat_id)
+        })
+        mat_id = str(mat.inserted_id)
+        await RetrievalService.index_material(mat_id)
+    finally:
+        _current_user_id.reset(owner_token)
 
     # Check chunks exist
     chunk_count_before = await db.knowledge_chunks.count_documents({"material_id": mat_id})
@@ -193,14 +199,16 @@ async def test_tutor_status_endpoint(client):
     assert res.status_code == 200
     data = res.json()
     assert "status" in data
-    assert data["status"] in ["ready", "model_not_installed", "ollama_not_running", "error"]
-    assert "configured_model" in data
+    assert data["status"] in ["ready", "model_not_installed", "ollama_not_running", "error", "disabled", "not_configured"]
+    assert "configured_model" in data or data["status"] == "disabled"
     assert "indexing" in data
     assert "total_chunks" in data["indexing"]
 
 @pytest.mark.asyncio
-async def test_tutor_chat_when_ollama_unavailable(client):
+async def test_tutor_chat_when_ollama_unavailable(client, monkeypatch):
     """Verify clear 503 error with setup message when Ollama is not running."""
+    monkeypatch.setattr(settings, "AI_PROVIDER", "ollama")
+    monkeypatch.setattr(settings, "OLLAMA_BASE_URL", "http://test-ollama")
     with patch.object(
         OllamaService,
         "check_status",
@@ -220,8 +228,10 @@ async def test_tutor_chat_when_ollama_unavailable(client):
         assert "Ollama is not running" in data["detail"]
 
 @pytest.mark.asyncio
-async def test_tutor_chat_when_model_missing(client):
+async def test_tutor_chat_when_model_missing(client, monkeypatch):
     """Verify clear 503 error with pull instructions when model is not installed."""
+    monkeypatch.setattr(settings, "AI_PROVIDER", "ollama")
+    monkeypatch.setattr(settings, "OLLAMA_BASE_URL", "http://test-ollama")
     with patch.object(
         OllamaService,
         "check_status",
@@ -245,15 +255,19 @@ async def test_tutor_chat_success_and_source_attribution(client):
     """Verify mocked successful chat with RAG source attribution and conversation persistence."""
     db = get_db()
     # Add indexed material
-    mat = await db.materials.insert_one({
+    owner_token = _current_user_id.set(client.user_id)
+    try:
+        mat = await db.materials.insert_one({
         "title": "A1 Negation Guide",
-        "user_id": "default",
+        "user_id": client.user_id,
         "cefr_level": "A1",
         "topic": "Negation",
         "extracted_text": "Nicht verneint Verben und Adjektive. Kein verneint Nomen mit unbestimmtem Artikel."
-    })
-    mat_id = str(mat.inserted_id)
-    await RetrievalService.index_material(mat_id)
+        })
+        mat_id = str(mat.inserted_id)
+        await RetrievalService.index_material(mat_id)
+    finally:
+        _current_user_id.reset(owner_token)
 
     mock_reply = (
         "Here is the simple rule for A1 learners:\n\n"
@@ -358,6 +372,7 @@ async def test_index_rebuild_and_retry_endpoints(client):
     db = get_db()
     mat = await db.materials.insert_one({
         "title": "Index Test Document",
+        "user_id": client.user_id,
         "file_type": "txt",
         "source_type": "upload",
         "cefr_level": "A1",

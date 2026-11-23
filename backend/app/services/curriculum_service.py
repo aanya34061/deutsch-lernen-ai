@@ -3,6 +3,7 @@ from typing import Optional, List, Dict, Any
 from bson import ObjectId
 from app.data.curriculum_manifest import get_curriculum_manifest
 from app.database import get_db
+from app.security import current_user_id
 
 logger = logging.getLogger("german_app.curriculum")
 
@@ -35,7 +36,7 @@ class CurriculumService:
     async def get_user_completed_lesson_ids(user_id: Optional[str] = None) -> set:
         """Returns set of completed lesson IDs for learner."""
         db = get_db()
-        progress = await db.progress.find_one({"user_id": "default", "is_seeded": False})
+        progress = await db.progress.find_one({"user_id": current_user_id(), "is_seeded": False})
         return set(progress.get("completed_lessons", [])) if progress else set()
 
     @staticmethod
@@ -77,7 +78,7 @@ class CurriculumService:
             })
 
         # User-created lessons based on personal Library material stay separate.
-        custom_query: Dict[str, Any] = {}
+        custom_query: Dict[str, Any] = {"user_id": current_user_id()}
         if level:
             custom_query["cefr_level"] = level.upper()
         if topic:
@@ -128,7 +129,8 @@ class CurriculumService:
             return lesson
 
         # Otherwise check user-created Library lessons.
-        query = {"_id": ObjectId(lesson_id)} if ObjectId.is_valid(lesson_id) else {"id": lesson_id}
+        query = ({"_id": ObjectId(lesson_id)} if ObjectId.is_valid(lesson_id) else {"id": lesson_id})
+        query["user_id"] = current_user_id()
         doc = await db.lessons.find_one(query)
         if doc:
             doc_id = str(doc.get("_id"))
@@ -157,11 +159,13 @@ class CurriculumService:
         custom_collection = getattr(db, "lessons", None)
         custom_doc = None
         if not curriculum_doc and lesson_id not in STATIC_LESSONS_BY_ID and custom_collection is not None:
-            custom_doc = await custom_collection.find_one({"_id": ObjectId(lesson_id)} if ObjectId.is_valid(lesson_id) else {"id": lesson_id})
+            custom_query = ({"_id": ObjectId(lesson_id)} if ObjectId.is_valid(lesson_id) else {"id": lesson_id})
+            custom_query["user_id"] = current_user_id()
+            custom_doc = await custom_collection.find_one(custom_query)
         if not curriculum_doc and not custom_doc and lesson_id not in STATIC_LESSONS_BY_ID:
             return False
         await db.progress.update_one(
-            {"user_id": "default", "is_seeded": False},
+            {"user_id": current_user_id(), "is_seeded": False},
             {
                 "$addToSet": {"completed_lessons": lesson_id},
                 "$set": {"is_seeded": False},
@@ -181,7 +185,7 @@ class CurriculumService:
         """Creates a structured study lesson derived from an uploaded Study Library material."""
         db = get_db()
         mat_query = {"_id": ObjectId(material_id)} if ObjectId.is_valid(material_id) else {"id": material_id}
-        material = await db.materials.find_one(mat_query)
+        material = await db.materials.find_one({**mat_query, "user_id": current_user_id(), "is_seeded": {"$ne": True}})
         if not material:
             raise ValueError(f"Material with ID {material_id} not found")
 
@@ -194,6 +198,7 @@ class CurriculumService:
         resolved_title = title or f"Study Session: {mat_title}"
 
         new_lesson = {
+            "user_id": current_user_id(),
             "title": resolved_title,
             "cefr_level": resolved_level,
             "module_title": module_title or "Uploaded Study Materials",

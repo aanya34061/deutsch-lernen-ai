@@ -23,6 +23,10 @@ class OllamaTimeoutError(OllamaError):
 
 class OllamaService:
     @staticmethod
+    def _provider() -> str:
+        return (settings.AI_PROVIDER or "disabled").strip().lower()
+
+    @staticmethod
     def _normalize_model_name(name: str) -> str:
         """Strip :latest or tag for flexible matching."""
         if ":" in name:
@@ -35,6 +39,31 @@ class OllamaService:
         Check whether Ollama is running and whether configured models are available.
         Does not throw; returns a structured status object.
         """
+        provider = cls._provider()
+        if provider == "disabled":
+            return {
+                "status": "disabled", "provider": "disabled", "is_ready": False,
+                "is_running": False, "model_available": False,
+                "message": "AI features are unavailable in this deployment.",
+                "setup_instructions": "A hosted AI provider can be configured by the application owner.",
+            }
+        if provider in {"openai-compatible", "hosted"}:
+            configured = bool(settings.AI_API_BASE_URL and settings.AI_API_KEY and settings.AI_MODEL)
+            return {
+                "status": "ready" if configured else "not_configured",
+                "provider": "hosted", "is_ready": configured, "is_running": configured,
+                "model_available": configured,
+                "configured_model": settings.AI_MODEL if configured else None,
+                "message": "Hosted AI is configured." if configured else "Hosted AI is not fully configured.",
+            }
+        if provider != "ollama" or not settings.OLLAMA_BASE_URL:
+            return {
+                "status": "disabled", "provider": "disabled", "is_ready": False,
+                "is_running": False, "model_available": False,
+                "message": "AI features are unavailable in this deployment.",
+                "setup_instructions": "A hosted AI provider can be configured by the application owner.",
+            }
+
         base_url = settings.OLLAMA_BASE_URL.rstrip("/")
         configured_model = settings.OLLAMA_MODEL
         configured_embed = settings.OLLAMA_EMBED_MODEL
@@ -161,6 +190,33 @@ class OllamaService:
         """
         Send a conversation history to Ollama and return the assistant response string.
         """
+        provider = cls._provider()
+        if provider == "disabled":
+            raise OllamaNotRunningError("AI tutoring is unavailable because no AI provider is configured.")
+        if provider in {"openai-compatible", "hosted"}:
+            if not (settings.AI_API_BASE_URL and settings.AI_API_KEY and settings.AI_MODEL):
+                raise OllamaNotRunningError("AI tutoring is unavailable because the hosted provider is not fully configured.")
+            formatted_messages = ([{"role": "system", "content": system_prompt}] if system_prompt else []) + [
+                {"role": message.get("role", "user"), "content": message.get("content", "")}
+                for message in messages if message.get("content")
+            ]
+            try:
+                async with httpx.AsyncClient(timeout=timeout or settings.OLLAMA_TIMEOUT_SECONDS) as client:
+                    res = await client.post(
+                        f"{settings.AI_API_BASE_URL.rstrip('/')}/chat/completions",
+                        headers={"Authorization": f"Bearer {settings.AI_API_KEY}"},
+                        json={"model": settings.AI_MODEL, "messages": formatted_messages, "temperature": max(0.0, min(1.0, temperature))},
+                    )
+                    res.raise_for_status()
+                    return res.json()["choices"][0]["message"]["content"].strip()
+            except httpx.TimeoutException as exc:
+                raise OllamaTimeoutError("The hosted AI provider timed out. Please try again.") from exc
+            except Exception as exc:
+                logger.warning("Hosted AI request failed (%s).", type(exc).__name__)
+                raise OllamaError("The hosted AI provider could not complete this request.") from exc
+        if provider != "ollama" or not settings.OLLAMA_BASE_URL:
+            raise OllamaNotRunningError("AI tutoring is unavailable because no AI provider is configured.")
+
         status_info = await cls.check_status()
         if not status_info["is_running"]:
             raise OllamaNotRunningError(
@@ -222,6 +278,28 @@ class OllamaService:
         """
         if not texts:
             return []
+
+        if cls._provider() == "disabled":
+            return None
+        if cls._provider() in {"openai-compatible", "hosted"}:
+            if not (settings.AI_API_BASE_URL and settings.AI_API_KEY and settings.AI_EMBED_MODEL):
+                return None
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    res = await client.post(
+                        f"{settings.AI_API_BASE_URL.rstrip('/')}/embeddings",
+                        headers={"Authorization": f"Bearer {settings.AI_API_KEY}"},
+                        json={"model": settings.AI_EMBED_MODEL, "input": texts},
+                    )
+                    res.raise_for_status()
+                    data = res.json().get("data", [])
+                    embeddings = [row.get("embedding") for row in data]
+                    return embeddings if len(embeddings) == len(texts) else None
+            except Exception as exc:
+                logger.info("Hosted embeddings unavailable (%s).", type(exc).__name__)
+                return None
+        if cls._provider() != "ollama" or not settings.OLLAMA_BASE_URL:
+            return None
 
         base_url = settings.OLLAMA_BASE_URL.rstrip("/")
         embed_model = settings.OLLAMA_EMBED_MODEL

@@ -32,6 +32,8 @@ async def connect_to_mongo():
         db_instance.client = None
         db_instance.db = None
         logger.error("Failed to connect to MongoDB (%s).", type(e).__name__)
+        if settings.APP_ENV.lower() == "production":
+            raise RuntimeError("Production MongoDB connection failed; verify MONGODB_URI and network access.") from e
 
 async def close_mongo_connection():
     if db_instance.client is not None:
@@ -54,12 +56,16 @@ async def check_db_health() -> dict:
         await db_instance.client.admin.command('ping')
         return {"status": "connected", "database": settings.MONGODB_DB_NAME}
     except Exception as e:
-        return {"status": "error", "error": str(e)}
+        logger.warning("MongoDB health check failed (%s).", type(e).__name__)
+        return {"status": "error", "error": "Database health check failed"}
 
 async def init_db_indexes():
     """Ensure essential indexes for collections exist."""
     try:
         db = get_db()
+        await db.accounts.create_index("username", unique=True)
+        await db.sessions.create_index("token_hash", unique=True)
+        await db.sessions.create_index("expires_at", expireAfterSeconds=0)
         # users
         await db.users.create_index("username", unique=True)
         # materials
@@ -106,8 +112,7 @@ async def hide_legacy_demo_records():
     """Label known legacy records and assign unowned records to this single-user app owner."""
     try:
         db = get_db()
-        # There is no authentication or multi-user model. Preserve existing unseeded
-        # material records as the single learner's collection, and mark ownership.
+        # Preserve pre-auth single-learner uploads and attach legacy ownership.
         # Never classify or delete a material based on its title.
         await db.materials.update_many(
             {"user_id": {"$exists": False}, "is_seeded": {"$ne": True}},
@@ -136,7 +141,7 @@ async def mark_interrupted_material_processing():
     """Make interrupted background jobs visibly retryable after an app restart."""
     try:
         await get_db().materials.update_many(
-            {"user_id": "default", "processing_status": {"$in": ["extracting", "indexing", "analyzing", "generating_notes", "generating_questions"]}},
+            {"user_id": {"$exists": True}, "is_seeded": {"$ne": True}, "processing_status": {"$in": ["extracting", "indexing", "analyzing", "generating_notes", "generating_questions"]}},
             {"$set": {
                 "processing_status": "failed",
                 "processing_error": "Processing was interrupted by an application restart. Retry to continue.",

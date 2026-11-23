@@ -7,11 +7,11 @@ def test_a1_manifest_has_six_modules_and_complete_published_lessons():
     modules = [module for module in manifest["modules"] if module["level"] == "A1"]
     topics = [topic for topic in manifest["topics"] if topic["level"] == "A1"]
     lessons = [lesson for lesson in manifest["lessons"] if lesson["cefr_level"] == "A1"]
-    assert len(modules) == 6
-    assert len(topics) == len(lessons) == 24
-    assert len({module["module_id"] for module in modules}) == 6
-    assert len({topic["topic_id"] for topic in topics}) == 24
-    assert len({lesson["lesson_id"] for lesson in lessons}) == 24
+    assert len(modules) == 7
+    assert len(topics) == len(lessons) == 28
+    assert len({module["module_id"] for module in modules}) == 7
+    assert len({topic["topic_id"] for topic in topics}) == 28
+    assert len({lesson["lesson_id"] for lesson in lessons}) == 28
     assert all(module["topic_ids"] for module in modules)
     for lesson in lessons:
         assert lesson["publication_status"] == "published"
@@ -29,11 +29,11 @@ def test_a2_manifest_has_five_modules_and_complete_published_lessons():
     modules = [module for module in manifest["modules"] if module["level"] == "A2"]
     topics = [topic for topic in manifest["topics"] if topic["level"] == "A2"]
     lessons = [lesson for lesson in manifest["lessons"] if lesson["cefr_level"] == "A2"]
-    assert len(modules) == 5
-    assert len(topics) == len(lessons) == 20
-    assert len({module["module_id"] for module in modules}) == 5
-    assert len({topic["topic_id"] for topic in topics}) == 20
-    assert len({lesson["lesson_id"] for lesson in lessons}) == 20
+    assert len(modules) == 6
+    assert len(topics) == len(lessons) == 31
+    assert len({module["module_id"] for module in modules}) == 6
+    assert len({topic["topic_id"] for topic in topics}) == 31
+    assert len({lesson["lesson_id"] for lesson in lessons}) == 31
     assert all(module["topic_ids"] for module in modules)
     for lesson in lessons:
         assert lesson["publication_status"] == "published"
@@ -45,9 +45,9 @@ def test_a2_manifest_has_five_modules_and_complete_published_lessons():
 
 def test_complete_curriculum_manifest_has_expected_structure_and_no_placeholders():
     manifest = get_curriculum_manifest()
-    expected = {"A1": (6, 24), "A2": (5, 20), "B1": (7, 28)}
-    assert len(manifest["modules"]) == 18
-    assert len(manifest["topics"]) == len(manifest["lessons"]) == 72
+    expected = {"A1": (7, 28), "A2": (6, 31), "B1": (7, 28)}
+    assert len(manifest["modules"]) == 20
+    assert len(manifest["topics"]) == len(manifest["lessons"]) == 87
     for level, (module_count, topic_count) in expected.items():
         modules = [module for module in manifest["modules"] if module["level"] == level]
         topics = [topic for topic in manifest["topics"] if topic["level"] == level]
@@ -71,9 +71,9 @@ async def test_a1_seed_is_idempotent_and_preserves_learner_progress():
     await db.progress.insert_one({"user_id": "default", "is_seeded": False, "completed_lessons": ["a1-lesson-1"]})
     await seed_initial_data_if_empty()
     await seed_initial_data_if_empty()
-    assert await db.curriculum_modules.count_documents({"level": "A1"}) == 6
-    assert await db.curriculum_topics.count_documents({"level": "A1"}) == 24
-    assert await db.curriculum_lessons.count_documents({"cefr_level": "A1"}) == 24
+    assert await db.curriculum_modules.count_documents({"level": "A1"}) == 7
+    assert await db.curriculum_topics.count_documents({"level": "A1"}) == 28
+    assert await db.curriculum_lessons.count_documents({"cefr_level": "A1"}) == 28
     progress = await db.progress.find_one({"user_id": "default", "is_seeded": False})
     assert progress["completed_lessons"] == ["a1-lesson-1"]
 
@@ -82,7 +82,7 @@ async def test_seed_persists_all_levels_idempotently():
     db = get_db()
     await seed_initial_data_if_empty()
     await seed_initial_data_if_empty()
-    for level, modules, topics, lessons in (("A1", 6, 24, 24), ("A2", 5, 20, 20), ("B1", 7, 28, 28)):
+    for level, modules, topics, lessons in (("A1", 7, 28, 28), ("A2", 6, 31, 31), ("B1", 7, 28, 28)):
         assert await db.curriculum_modules.count_documents({"level": level}) == modules
         assert await db.curriculum_topics.count_documents({"level": level}) == topics
         assert await db.curriculum_lessons.count_documents({"cefr_level": level}) == lessons
@@ -92,13 +92,13 @@ async def test_a1_modules_topics_and_lesson_content_are_served_from_database(cli
     modules = await client.get("/api/v1/lessons/modules?level=A1")
     assert modules.status_code == 200
     result = modules.json()
-    assert len(result) == 6
-    assert sum(len(module["topics"]) for module in result) == 24
+    assert len(result) == 7
+    assert sum(len(module["topics"]) for module in result) == 28
     assert all(topic["lesson_id"] for module in result for topic in module["topics"])
 
     lessons = await client.get("/api/v1/lessons?level=A1")
     assert lessons.status_code == 200
-    assert len(lessons.json()) == 24
+    assert len(lessons.json()) == 28
     lesson_id = result[0]["topics"][0]["lesson_id"]
     detail = await client.get(f"/api/v1/lessons/{lesson_id}")
     assert detail.status_code == 200
@@ -113,9 +113,9 @@ async def test_a2_modules_and_lessons_are_served_from_database(client):
     modules = await client.get("/api/v1/lessons/modules?level=A2")
     lessons = await client.get("/api/v1/lessons?level=A2")
     assert modules.status_code == lessons.status_code == 200
-    assert len(modules.json()) == 5
-    assert sum(len(module["topics"]) for module in modules.json()) == 20
-    assert len(lessons.json()) == 20
+    assert len(modules.json()) == 6
+    assert sum(len(module["topics"]) for module in modules.json()) == 31
+    assert len(lessons.json()) == 31
 
 
 async def test_b1_modules_and_lessons_are_served_from_database(client):

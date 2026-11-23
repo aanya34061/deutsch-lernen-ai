@@ -9,6 +9,7 @@ from app.models.exercise import (
 )
 from app.services.curriculum_service import CurriculumService, ALL_STATIC_LESSONS
 from app.database import get_db
+from app.security import current_user_id
 
 logger = logging.getLogger("german_app.exercises")
 
@@ -39,7 +40,7 @@ class ExerciseService:
                     return ex
 
         # 2. Search in MongoDB lessons
-        doc = await db.lessons.find_one({"exercises.id": exercise_id})
+        doc = await db.lessons.find_one({"exercises.id": exercise_id, "user_id": current_user_id()})
         if doc:
             for ex in doc.get("exercises", []):
                 if ex.get("id") == exercise_id:
@@ -47,9 +48,9 @@ class ExerciseService:
 
         # Search standalone database exercises (including AI generated ones).
         from bson import ObjectId
-        standalone_ex = await db.exercises.find_one({"id": exercise_id})
+        standalone_ex = await db.exercises.find_one({"id": exercise_id, "$or": [{"user_id": current_user_id()}, {"is_seeded": True}]})
         if not standalone_ex and ObjectId.is_valid(exercise_id):
-            standalone_ex = await db.exercises.find_one({"_id": ObjectId(exercise_id)})
+            standalone_ex = await db.exercises.find_one({"_id": ObjectId(exercise_id), "$or": [{"user_id": current_user_id()}, {"is_seeded": True}]})
         if standalone_ex:
             if "_id" in standalone_ex:
                 standalone_ex["id"] = standalone_ex.get("id") or str(standalone_ex["_id"])
@@ -156,7 +157,7 @@ class ExerciseService:
         db = get_db()
         attempt_doc = {
             "exercise_id": exercise_id,
-            "user_id": "default",
+            "user_id": current_user_id(),
             "is_seeded": False,
             "type": ex_type,
             "skill": ex.get("skill", "grammar"),

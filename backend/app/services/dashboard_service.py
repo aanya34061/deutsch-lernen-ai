@@ -6,6 +6,8 @@ from app.models.progress import DashboardSummaryResponse, DailyStats, SkillScore
 from app.models.material import MaterialResponse
 from app.models.vocabulary import VocabularyResponse
 from app.data.curriculum_manifest import get_curriculum_manifest
+from app.security import current_user_id
+from bson import ObjectId
 
 
 class DashboardService:
@@ -14,11 +16,11 @@ class DashboardService:
         db = get_db()
         # The app currently has one learner identity. Scope every progress source
         # to that identity instead of selecting the first unseeded database record.
-        user = await db.users.find_one({"username": "learner", "is_seeded": False})
+        user = await db.accounts.find_one({"_id": ObjectId(current_user_id())})
 
-        attempts = await db.exercise_attempts.find({"user_id": "default", "is_seeded": False}).sort("timestamp", -1).to_list(length=5000)
-        speaking_sessions = await db.speaking_sessions.find({"user_id": "default", "is_seeded": False}).to_list(length=5000)
-        listening_completions = await db.listening_resource_completions.find({"user_id": "default"}).to_list(length=5000)
+        attempts = await db.exercise_attempts.find({"user_id": current_user_id(), "is_seeded": False}).sort("timestamp", -1).to_list(length=5000)
+        speaking_sessions = await db.speaking_sessions.find({"user_id": current_user_id(), "is_seeded": False}).to_list(length=5000)
+        listening_completions = await db.listening_resource_completions.find({"user_id": current_user_id()}).to_list(length=5000)
         now = datetime.now(timezone.utc)
         today = now.astimezone().date()
         today_attempts = []
@@ -75,13 +77,13 @@ class DashboardService:
             streak += 1
             date_cursor -= timedelta(days=1)
 
-        recent_docs = await db.materials.find({"user_id": "default", "is_seeded": {"$ne": True}}).sort("created_at", -1).limit(5).to_list(length=5)
+        recent_docs = await db.materials.find({"user_id": current_user_id(), "is_seeded": {"$ne": True}}).sort("created_at", -1).limit(5).to_list(length=5)
         recent_materials = []
         for doc in recent_docs:
             doc["id"] = str(doc.get("_id", doc.get("id", "")))
             recent_materials.append(MaterialResponse(**doc))
 
-        actual_vocab = {"user_id": "default", "is_seeded": False}
+        actual_vocab = {"user_id": current_user_id(), "is_seeded": False}
         vocab_saved_count = await db.vocabulary.count_documents(actual_vocab)
         vocab_mastered_count = await db.vocabulary.count_documents({**actual_vocab, "status": "mastered"})
         vocab_due_query = {**actual_vocab, "due_for_revision": True}
@@ -91,7 +93,7 @@ class DashboardService:
         for doc in vocab_docs:
             doc["id"] = str(doc.get("_id", doc.get("id", "")))
             vocab_queue.append(VocabularyResponse(**doc))
-        progress = await db.progress.find_one({"user_id": "default", "is_seeded": False})
+        progress = await db.progress.find_one({"user_id": current_user_id(), "is_seeded": False})
         completed_lessons = set(progress.get("completed_lessons", [])) if progress else set()
         manifest_lessons = get_curriculum_manifest()["lessons"]
         curriculum_by_level = {
@@ -140,12 +142,8 @@ class DashboardService:
         if new_level not in valid_levels:
             raise ValueError(f"Invalid CEFR level: {new_level}. Must be one of {valid_levels}")
         db = get_db()
-        existing = await db.users.find_one({"username": "learner"})
-        updates = {"$set": {"username": "learner", "current_level": new_level, "is_seeded": False}}
-        if existing and existing.get("is_seeded"):
-            updates["$unset"] = {
-                "name": "", "target_level": "", "streak_days": "", "daily_goal_minutes": "",
-                "native_language": "", "created_at": ""
-            }
-        await db.users.update_one({"username": "learner"}, updates, upsert=True)
+        await db.accounts.update_one(
+            {"_id": ObjectId(current_user_id())},
+            {"$set": {"current_level": new_level}},
+        )
         return {"success": True, "current_level": new_level}

@@ -8,6 +8,7 @@ from bson import ObjectId
 
 from app.config import settings
 from app.database import get_db
+from app.security import current_user_id
 from app.models.exercise import ExerciseLearnerView
 from app.services.ollama_service import OllamaService
 from app.services.curriculum_service import CurriculumService, ALL_STATIC_LESSONS
@@ -111,7 +112,7 @@ class AiExerciseService:
 
         if material_id:
             mid = ObjectId(material_id) if ObjectId.is_valid(material_id) else material_id
-            doc = await db.materials.find_one({**({"_id": mid} if isinstance(mid, ObjectId) else {"id": str(mid)}), "user_id": "default", "is_seeded": {"$ne": True}})
+            doc = await db.materials.find_one({**({"_id": mid} if isinstance(mid, ObjectId) else {"id": str(mid)}), "user_id": current_user_id(), "is_seeded": {"$ne": True}})
             if not doc or doc.get("status") != "ready" or not (doc.get("extracted_text") or "").strip():
                 raise ValueError(f"Study material '{material_id}' was not found.")
             if not lesson_id:
@@ -145,6 +146,7 @@ class AiExerciseService:
             if not lesson:
                 db = get_db()
                 query = {"_id": ObjectId(lesson_id)} if ObjectId.is_valid(lesson_id) else {"id": lesson_id}
+                query["user_id"] = current_user_id()
                 lesson = await db.lessons.find_one(query)
                 if lesson:
                     lesson["id"] = str(lesson.get("_id", lesson.get("id", lesson_id)))
@@ -371,11 +373,12 @@ class AiExerciseService:
                 "correct_sentence_de": correct_sentence,
                 "difficulty": "beginner" if level == "A1" else ("intermediate" if level == "A2" else "advanced"),
                 "is_ai_generated": not bool(item.get("_fallback_lesson_id")),
-                "is_seeded": False
+                "is_seeded": False,
+                "user_id": current_user_id(),
             }
             if material_id:
-                material = await db.materials.find_one({"_id": ObjectId(material_id), "user_id": "default", "is_seeded": {"$ne": True}}) if ObjectId.is_valid(material_id) else None
-                doc.update({"user_id": "default", "origin": "tutor_generated", "source_type": "uploaded_material", "source_title": material.get("title") if material else None})
+                material = await db.materials.find_one({"_id": ObjectId(material_id), "user_id": current_user_id(), "is_seeded": {"$ne": True}}) if ObjectId.is_valid(material_id) else None
+                doc.update({"user_id": current_user_id(), "origin": "tutor_generated", "source_type": "uploaded_material", "source_title": material.get("title") if material else None})
 
             validated_docs.append(doc)
             learner_views.append(

@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException, status
 from app.models.level import LevelDetail, LevelSummaryResponse, GrammarConcept, LessonOutline
 from app.database import get_db
+from app.security import current_user_id
+from bson import ObjectId
 
 router = APIRouter(prefix="/levels", tags=["German CEFR Levels"])
 
@@ -140,7 +142,7 @@ async def get_all_levels():
     """Retrieve all supported CEFR German learning levels with metadata."""
     active_code = "A1"
     db = get_db()
-    user = await db.users.find_one({"is_seeded": {"$ne": True}})
+    user = await db.accounts.find_one({"_id": ObjectId(current_user_id())})
     if user and "current_level" in user:
         active_code = user["current_level"]
 

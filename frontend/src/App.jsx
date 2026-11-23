@@ -18,7 +18,8 @@ import PracticeSpeakingPage from './pages/PracticeSpeakingPage';
 import TutorPage from './pages/TutorPage';
 import ProgressPage from './pages/ProgressPage';
 import SettingsPage from './pages/SettingsPage';
-import { getHealth, getDashboardSummary, updateLearnerLevel } from './services/api';
+import AuthPage from './pages/AuthPage';
+import { getHealth, getDashboardSummary, updateLearnerLevel, getCurrentUser, refreshCsrfToken, logout } from './services/api';
 
 export default function App() {
   const location = useLocation();
@@ -30,8 +31,21 @@ export default function App() {
   const [error, setError] = useState(null);
   const [mongoUnavailable, setMongoUnavailable] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [currentUser, setCurrentUser] = useState(undefined);
+
+  useEffect(() => {
+    let active = true;
+    getCurrentUser()
+      .then(async (user) => {
+        await refreshCsrfToken();
+        if (active) setCurrentUser(user);
+      })
+      .catch(() => { if (active) setCurrentUser(null); });
+    return () => { active = false; };
+  }, []);
 
   const fetchData = useCallback(async () => {
+    if (!currentUser) return;
     setLoading(true);
     setError(null);
     setMongoUnavailable(false);
@@ -61,11 +75,11 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [currentUser]);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    if (currentUser) fetchData();
+  }, [fetchData, currentUser]);
 
   useEffect(() => {
     const isOnSummaryPage = ['/', '/progress'].includes(location.pathname);
@@ -89,6 +103,17 @@ export default function App() {
     }
   };
 
+  const handleLogout = async () => {
+    try { await logout(); } finally { setCurrentUser(null); }
+  };
+
+  if (currentUser === undefined) {
+    return <div className="min-vh-100 d-flex align-items-center justify-content-center text-muted">Checking your session…</div>;
+  }
+  if (!currentUser) {
+    return <AuthPage onAuthenticated={setCurrentUser} />;
+  }
+
   return (
     <div className="layout-wrapper">
       <Sidebar
@@ -104,6 +129,7 @@ export default function App() {
           onRefresh={fetchData}
           loading={loading}
           onToggleMobileSidebar={() => setMobileSidebarOpen(!mobileSidebarOpen)}
+          onLogout={handleLogout}
         />
         <main className="content-body">
           <Routes>

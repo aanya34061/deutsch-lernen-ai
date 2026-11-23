@@ -2,14 +2,39 @@ import axios from 'axios';
 
 const API_ORIGIN = import.meta.env.VITE_API_ORIGIN?.replace(/\/$/, '');
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || (API_ORIGIN ? `${API_ORIGIN}/api/v1` : '/api/v1');
+let csrfToken = null;
 
 const api = axios.create({
   baseURL: API_BASE_URL,
+  withCredentials: true,
   headers: {
     'Content-Type': 'application/json',
   },
   timeout: 10000,
 });
+
+api.interceptors.request.use((config) => {
+  if (csrfToken && !['get', 'head', 'options'].includes((config.method || 'get').toLowerCase())) {
+    config.headers['X-CSRF-Token'] = csrfToken;
+  }
+  return config;
+});
+
+export const getCurrentUser = async () => (await api.get('/auth/me')).data;
+export const refreshCsrfToken = async () => {
+  const result = (await api.get('/auth/csrf')).data;
+  csrfToken = result.csrf_token;
+  return csrfToken;
+};
+export const authenticate = async (endpoint, credentials) => {
+  const result = (await api.post(`/auth/${endpoint}`, credentials)).data;
+  csrfToken = result.csrf_token;
+  return result;
+};
+export const logout = async () => {
+  await api.post('/auth/logout');
+  csrfToken = null;
+};
 
 export const getHealth = async () => {
   const response = await api.get('/health');

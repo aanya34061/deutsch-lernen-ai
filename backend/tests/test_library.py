@@ -201,7 +201,7 @@ async def test_duplicate_upload_reuses_existing_material(client: AsyncClient):
     assert first.status_code == 201
     assert second.status_code == 201
     assert first.json()["id"] == second.json()["id"]
-    assert second.json()["user_id"] == "default"
+    assert second.json()["user_id"] == client.user_id
 
 
 @pytest.mark.asyncio

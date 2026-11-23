@@ -267,6 +267,14 @@ export default function TutorPage({ currentLevel }) {
       );
     }
 
+    if (aiStatus?.status === 'disabled' || aiStatus?.status === 'not_configured') {
+      return (
+        <span className="badge bg-secondary-subtle text-secondary border" title={aiStatus?.message || 'AI is unavailable.'}>
+          AI unavailable
+        </span>
+      );
+    }
+
     if (aiStatus?.is_ready) {
       return (
         <span
@@ -320,7 +328,9 @@ export default function TutorPage({ currentLevel }) {
             {renderStatusBadge()}
           </div>
           <small className="text-muted">
-            Patient beginner tutor (Klara) with local AI grounded in your uploaded study notes.
+            {aiStatus?.status === 'disabled' || aiStatus?.status === 'not_configured'
+              ? 'AI is not configured on this preview. The rest of your learning tools remain available.'
+              : 'Patient beginner tutor (Klara) with local AI grounded in your uploaded study notes.'}
           </small>
         </div>
 
@@ -333,13 +343,13 @@ export default function TutorPage({ currentLevel }) {
             <i className="bi bi-patch-question-fill"></i>
             <span>Practice Questions</span>
           </button>
-          <button
+          {aiStatus?.status !== 'disabled' && aiStatus?.status !== 'not_configured' && <button
             className="btn btn-outline-secondary btn-sm"
             onClick={() => setShowSetupModal(true)}
             title="View AI Engine status and setup instructions"
           >
             <i className="bi bi-info-circle me-1"></i> Setup Guide
-          </button>
+          </button>}
         </div>
       </div>
 

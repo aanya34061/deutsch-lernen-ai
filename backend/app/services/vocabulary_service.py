@@ -12,6 +12,7 @@ from app.models.vocabulary import (
     ExtractVocabularyResponse
 )
 from app.database import get_db
+from app.security import current_user_id
 
 logger = logging.getLogger("german_app.vocabulary")
 
@@ -69,7 +70,7 @@ class VocabularyService:
     ) -> List[Dict[str, Any]]:
         """Retrieves user vocabulary with multi-criteria filtering."""
         db = get_db()
-        query: Dict[str, Any] = {"user_id": "default", "is_seeded": False}
+        query: Dict[str, Any] = {"user_id": current_user_id(), "is_seeded": False}
 
         if level:
             query["cefr_level"] = level.upper()
@@ -96,7 +97,7 @@ class VocabularyService:
         """Manually creates a new vocabulary entry."""
         db = get_db()
         doc = data.model_dump()
-        doc["user_id"] = "default"
+        doc["user_id"] = current_user_id()
         doc["is_seeded"] = False
         doc["created_at"] = datetime.now(timezone.utc).isoformat()
         doc["updated_at"] = doc["created_at"]
@@ -116,7 +117,7 @@ class VocabularyService:
 
         for w in batch.words:
             doc = w.model_dump()
-            doc["user_id"] = "default"
+            doc["user_id"] = current_user_id()
             doc["is_seeded"] = False
             doc["source_type"] = batch.source_type
             doc["source_id"] = batch.source_id
@@ -126,7 +127,7 @@ class VocabularyService:
             doc["status"] = doc.get("status") or "new"
 
             result = await db.vocabulary.update_one(
-                {"word": doc["word"], "user_id": "default", "is_seeded": False},
+                {"word": doc["word"], "user_id": current_user_id(), "is_seeded": False},
                 {"$setOnInsert": doc},
                 upsert=True
             )
@@ -139,7 +140,8 @@ class VocabularyService:
     async def update_vocabulary(vocab_id: str, data: VocabularyUpdate) -> Optional[Dict[str, Any]]:
         """Updates vocabulary status, score, or metadata."""
         db = get_db()
-        query = {"_id": ObjectId(vocab_id)} if ObjectId.is_valid(vocab_id) else {"id": vocab_id}
+        query = ({"_id": ObjectId(vocab_id)} if ObjectId.is_valid(vocab_id) else {"id": vocab_id})
+        query["user_id"] = current_user_id()
         update_fields = {k: v for k, v in data.model_dump().items() if v is not None}
         update_fields["updated_at"] = datetime.now(timezone.utc).isoformat()
 
@@ -159,7 +161,8 @@ class VocabularyService:
     async def delete_vocabulary(vocab_id: str) -> bool:
         """Removes a vocabulary card."""
         db = get_db()
-        query = {"_id": ObjectId(vocab_id)} if ObjectId.is_valid(vocab_id) else {"id": vocab_id}
+        query = ({"_id": ObjectId(vocab_id)} if ObjectId.is_valid(vocab_id) else {"id": vocab_id})
+        query["user_id"] = current_user_id()
         res = await db.vocabulary.delete_one(query)
         return res.deleted_count > 0
 

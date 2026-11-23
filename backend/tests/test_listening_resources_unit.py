@@ -95,14 +95,13 @@ async def test_external_completion_counts_as_listening_activity_without_score(mo
 
 
 @pytest.mark.asyncio
-async def test_resource_api_filters_and_persists_completion(monkeypatch):
+async def test_resource_api_filters_and_persists_completion(monkeypatch, client: AsyncClient):
     db = Database()
     monkeypatch.setattr("app.services.practice_service.get_db", lambda: db)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        listing = await client.get("/api/v1/practice/listening/resources?level=A2&category=Listening%20Practice")
-        invalid = await client.get("/api/v1/practice/listening/resources?level=C1")
-        complete = await client.post("/api/v1/practice/listening/resources/goethe-a2-model-listening/complete")
-        refreshed = await client.get("/api/v1/practice/listening/resources?level=A2")
+    listing = await client.get("/api/v1/practice/listening/resources?level=A2&category=Listening%20Practice")
+    invalid = await client.get("/api/v1/practice/listening/resources?level=C1")
+    complete = await client.post("/api/v1/practice/listening/resources/goethe-a2-model-listening/complete")
+    refreshed = await client.get("/api/v1/practice/listening/resources?level=A2")
 
     assert listing.status_code == 200 and listing.json()
     assert all(item["cefr_level"] == "A2" for item in listing.json())

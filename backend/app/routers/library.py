@@ -1,6 +1,7 @@
 from typing import Optional
 from fastapi import APIRouter, UploadFile, File, Form, Query, HTTPException, status, BackgroundTasks
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from pymongo.errors import PyMongoError
 
 from app.models.material import (
@@ -13,6 +14,7 @@ from app.services.library_service import LibraryService, clean_extracted_text
 from app.services.extractor_service import ExtractorService
 from app.services.material_intelligence_service import MaterialIntelligenceService
 from app.database import get_db
+from app.security import current_user_id, run_as_user
 from bson import ObjectId
 
 router = APIRouter(prefix="/library", tags=["Study Library"])
@@ -39,7 +41,7 @@ async def upload_material(
             description=description
         )
         if material.status == "ready" and material.processing_status != "ready":
-            background_tasks.add_task(MaterialIntelligenceService.process_material, material.id)
+            background_tasks.add_task(run_as_user, current_user_id(), MaterialIntelligenceService.process_material, material.id)
         return material
     except HTTPException:
         raise
@@ -63,7 +65,7 @@ async def add_learning_link(link_data: LearningLinkCreate, background_tasks: Bac
     try:
         material = await LibraryService.add_learning_link(link_data)
         if material.status == "ready" and material.processing_status != "ready":
-            background_tasks.add_task(MaterialIntelligenceService.process_material, material.id)
+            background_tasks.add_task(run_as_user, current_user_id(), MaterialIntelligenceService.process_material, material.id)
         return material
     except HTTPException:
         raise
@@ -175,6 +177,7 @@ async def get_material_file(material_id: str):
             filename=original_filename,
             media_type=media_type,
             content_disposition_type="inline",
+            background=BackgroundTask(file_path.unlink, missing_ok=True) if file_path.parent.name != "uploads" and file_path.name.startswith("deutsch-file-") else None,
         )
     except HTTPException:
         raise
@@ -195,18 +198,22 @@ async def retry_material_processing(material_id: str, background_tasks: Backgrou
     material = await LibraryService.get_material(material_id)
     if material.file_type == "image" and not (material.extracted_text or "").strip():
         file_path, _, _ = await LibraryService.get_material_file(material_id)
-        extracted_info = ExtractorService.extract_file_content(str(file_path), "image")
+        try:
+            extracted_info = ExtractorService.extract_file_content(str(file_path), "image")
+        finally:
+            if file_path.name.startswith("deutsch-file-"):
+                file_path.unlink(missing_ok=True)
         extracted_text = clean_extracted_text(extracted_info.get("text"))
         if not extracted_text:
             error = extracted_info.get("error") or "OCR found no readable text in this image."
             await get_db().materials.update_one(
-                {"_id": ObjectId(material_id), "user_id": "default", "is_seeded": {"$ne": True}},
+                {"_id": ObjectId(material_id), "user_id": current_user_id(), "is_seeded": {"$ne": True}},
                 {"$set": {"status": "failed", "error_message": error, "processing_error": error}},
             )
             raise HTTPException(status_code=422, detail=error)
 
         await get_db().materials.update_one(
-            {"_id": ObjectId(material_id), "user_id": "default", "is_seeded": {"$ne": True}},
+            {"_id": ObjectId(material_id), "user_id": current_user_id(), "is_seeded": {"$ne": True}},
             {"$set": {
                 "extracted_text": extracted_text,
                 "summary": extracted_info.get("summary"),
@@ -226,8 +233,8 @@ async def retry_material_processing(material_id: str, background_tasks: Backgrou
         raise HTTPException(status_code=409, detail=material.error_message or "This source has no readable extracted text to process.")
     oid = ObjectId(material_id)
     await get_db().materials.update_one(
-        {"_id": oid, "user_id": "default", "is_seeded": {"$ne": True}},
+        {"_id": oid, "user_id": current_user_id(), "is_seeded": {"$ne": True}},
         {"$set": {"processing_status": "uploaded", "processing_error": None}},
     )
-    background_tasks.add_task(MaterialIntelligenceService.process_material, material_id, True)
+    background_tasks.add_task(run_as_user, current_user_id(), MaterialIntelligenceService.process_material, material_id, True)
     return {"status": "queued", "material_id": material_id}

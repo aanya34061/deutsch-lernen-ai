@@ -1,13 +1,21 @@
 import pytest
+from bson import ObjectId
+from app.security import _current_user_id
 
 from app.services.dashboard_service import DashboardService
+
+TEST_USER_ID = "64b000000000000000000001"
 
 
 @pytest.fixture(autouse=True)
 async def setup_db():
     # Override the integration fixture so these tests never connect to or mutate
     # the developer's configured MongoDB database.
-    yield
+    token = _current_user_id.set(TEST_USER_ID)
+    try:
+        yield
+    finally:
+        _current_user_id.reset(token)
 
 
 class FakeCursor:
@@ -69,42 +77,43 @@ class FakeCollection:
 
 
 class FakeDatabase:
-    def __init__(self, *, attempts=(), progress=(), vocabulary=(), users=(), speaking_sessions=(), listening_completions=()):
+    def __init__(self, *, attempts=(), progress=(), vocabulary=(), users=(), accounts=(), speaking_sessions=(), listening_completions=()):
         self.exercise_attempts = FakeCollection(attempts)
         self.progress = FakeCollection(progress)
         self.vocabulary = FakeCollection(vocabulary)
         self.users = FakeCollection(users)
+        self.accounts = FakeCollection(accounts)
         self.materials = FakeCollection()
         self.speaking_sessions = FakeCollection(speaking_sessions)
         self.listening_resource_completions = FakeCollection(listening_completions)
 
 
 @pytest.mark.asyncio
-async def test_dashboard_uses_only_default_learners_persisted_records(monkeypatch):
+async def test_dashboard_uses_only_authenticated_learners_persisted_records(monkeypatch):
     database = FakeDatabase(
-        users=[{"username": "learner", "current_level": "A2", "is_seeded": False}],
+        accounts=[{"_id": ObjectId(TEST_USER_ID), "name": "Learner", "current_level": "A2"}],
         progress=[
             {"user_id": "legacy-demo", "is_seeded": True, "completed_lessons": ["a1-lesson-1", "a1-lesson-2"]},
-            {"user_id": "default", "completed_lessons": ["a1-lesson-1", "a1-lesson-2", "a1-lesson-3"]},
-            {"user_id": "default", "is_seeded": False, "completed_lessons": ["a1-lesson-1"]},
+            {"user_id": TEST_USER_ID, "completed_lessons": ["a1-lesson-1", "a1-lesson-2", "a1-lesson-3"]},
+            {"user_id": TEST_USER_ID, "is_seeded": False, "completed_lessons": ["a1-lesson-1"]},
         ],
         attempts=[
             {"user_id": "legacy-demo", "is_seeded": True, "skill": "reading", "score": 100, "timestamp": "2026-10-21T12:00:00+00:00"},
-            {"user_id": "default", "skill": "reading", "score": 99, "timestamp": "2026-10-21T12:00:00+00:00"},
-            {"user_id": "default", "is_seeded": False, "skill": "reading", "score": 40, "timestamp": "2026-10-21T12:00:00+00:00"},
+            {"user_id": TEST_USER_ID, "skill": "reading", "score": 99, "timestamp": "2026-10-21T12:00:00+00:00"},
+            {"user_id": TEST_USER_ID, "is_seeded": False, "skill": "reading", "score": 40, "timestamp": "2026-10-21T12:00:00+00:00"},
         ],
         vocabulary=[
             {"user_id": "legacy-demo", "is_seeded": True, "status": "mastered"},
-            {"user_id": "default", "status": "mastered"},
-            {"user_id": "default", "is_seeded": False, "status": "new"},
+            {"user_id": TEST_USER_ID, "status": "mastered"},
+            {"user_id": TEST_USER_ID, "is_seeded": False, "status": "new"},
         ],
         speaking_sessions=[
-            {"user_id": "default", "is_seeded": False, "messages": [{"role": "assistant"}]},
-            {"user_id": "default", "messages": [{"role": "user"}, {"role": "assistant"}]},
-            {"user_id": "default", "is_seeded": False, "messages": [{"role": "user"}, {"role": "assistant"}]},
+            {"user_id": TEST_USER_ID, "is_seeded": False, "messages": [{"role": "assistant"}]},
+            {"user_id": TEST_USER_ID, "messages": [{"role": "user"}, {"role": "assistant"}]},
+            {"user_id": TEST_USER_ID, "is_seeded": False, "messages": [{"role": "user"}, {"role": "assistant"}]},
             {"user_id": "legacy-demo", "is_seeded": False, "messages": [{"role": "user"}]},
         ],
-        listening_completions=[{"user_id": "default", "resource_id": "goethe-a1-model-listening", "cefr_level": "A1", "completed_at": "2026-10-21T12:00:00+00:00"}],
+        listening_completions=[{"user_id": TEST_USER_ID, "resource_id": "goethe-a1-model-listening", "cefr_level": "A1", "completed_at": "2026-10-21T12:00:00+00:00"}],
     )
     monkeypatch.setattr("app.services.dashboard_service.get_db", lambda: database)
 
@@ -148,13 +157,13 @@ async def test_lesson_completion_is_scoped_and_idempotent(monkeypatch):
     completed = await CurriculumService.get_user_completed_lesson_ids()
 
     assert completed == {"a1-lesson-1"}
-    own_progress = next(doc for doc in database.progress.docs if doc.get("user_id") == "default")
+    own_progress = next(doc for doc in database.progress.docs if doc.get("user_id") == TEST_USER_ID)
     assert own_progress["completed_lessons"] == ["a1-lesson-1"]
     assert own_progress["is_seeded"] is False
 
 
 @pytest.mark.asyncio
-async def test_exercise_attempt_persists_real_score_under_default_user(monkeypatch):
+async def test_exercise_attempt_persists_real_score_under_authenticated_user(monkeypatch):
     from app.services.exercise_service import ExerciseService
 
     database = FakeDatabase()
@@ -165,5 +174,5 @@ async def test_exercise_attempt_persists_real_score_under_default_user(monkeypat
     assert result.score == 100
     assert len(database.exercise_attempts.inserted) == 1
     attempt = database.exercise_attempts.inserted[0]
-    assert attempt["user_id"] == "default"
+    assert attempt["user_id"] == TEST_USER_ID
     assert attempt["is_seeded"] is False

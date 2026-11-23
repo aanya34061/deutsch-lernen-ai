@@ -10,6 +10,7 @@ from app.models.vocabulary import (
 )
 from app.services.vocabulary_service import VocabularyService
 from app.database import get_db
+from app.security import current_user_id
 from bson import ObjectId
 
 router = APIRouter(prefix="/vocabulary", tags=["Vocabulary Management"])
@@ -79,7 +80,8 @@ async def extract_vocabulary_from_material(req: ExtractFromMaterialRequest):
 
     if req.material_id:
         db = get_db()
-        mat_query = {"_id": ObjectId(req.material_id)} if ObjectId.is_valid(req.material_id) else {"id": req.material_id}
+        mat_query = ({"_id": ObjectId(req.material_id)} if ObjectId.is_valid(req.material_id) else {"id": req.material_id})
+        mat_query["user_id"] = current_user_id()
         mat = await db.materials.find_one(mat_query)
         if mat:
             material_title = mat.get("title")

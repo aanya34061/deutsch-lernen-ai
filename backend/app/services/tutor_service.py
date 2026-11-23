@@ -6,6 +6,7 @@ from bson import ObjectId
 
 from app.config import settings
 from app.database import get_db
+from app.security import current_user_id
 from app.models.conversation import ConversationResponse, ConversationSummary
 from app.services.ollama_service import (
     OllamaService,
@@ -196,7 +197,9 @@ class TutorService:
         conv_doc = None
         if conversation_id and conversation_id.strip():
             cid = ObjectId(conversation_id) if ObjectId.is_valid(conversation_id) else conversation_id
-            conv_doc = await db.conversations.find_one({"_id": cid} if isinstance(cid, ObjectId) else {"id": str(cid)})
+            conv_query = ({"_id": cid} if isinstance(cid, ObjectId) else {"id": str(cid)})
+            conv_query["user_id"] = current_user_id()
+            conv_doc = await db.conversations.find_one(conv_query)
             if not conv_doc:
                 raise ValueError(f"Conversation '{conversation_id}' was not found.")
 
@@ -207,7 +210,7 @@ class TutorService:
             # Create title from first message
             title = clean_msg[:40] + ("..." if len(clean_msg) > 40 else "")
             new_conv = {
-                "user_id": user_id or "default",
+                "user_id": user_id or current_user_id(),
                 "title": title,
                 "cefr_level": level_clean,
                 "topic": "German Practice",
@@ -221,7 +224,7 @@ class TutorService:
 
         if material_id:
             mid = ObjectId(material_id) if ObjectId.is_valid(material_id) else material_id
-            material = await db.materials.find_one({**({"_id": mid} if isinstance(mid, ObjectId) else {"id": str(mid)}), "user_id": "default", "is_seeded": {"$ne": True}})
+            material = await db.materials.find_one({**({"_id": mid} if isinstance(mid, ObjectId) else {"id": str(mid)}), "user_id": current_user_id(), "is_seeded": {"$ne": True}})
             if not material or material.get("is_seeded") is True:
                 raise ValueError(f"Study material '{material_id}' was not found.")
 
@@ -317,7 +320,7 @@ class TutorService:
             conv_id = str(res.inserted_id)
         else:
             await db.conversations.update_one(
-                {"_id": conv_doc["_id"]},
+                {"_id": conv_doc["_id"], "user_id": current_user_id()},
                 {
                     "$push": {"messages": {"$each": [user_entry, assistant_entry]}},
                     "$set": {"updated_at": now_iso, "cefr_level": level_clean}
@@ -338,9 +341,7 @@ class TutorService:
     async def list_conversations(cls, user_id: Optional[str] = None) -> List[ConversationSummary]:
         """Retrieve summaries of previous tutor conversations."""
         db = get_db()
-        query: Dict[str, Any] = {}
-        if user_id:
-            query["user_id"] = user_id
+        query: Dict[str, Any] = {"user_id": current_user_id()}
 
         cursor = db.conversations.find(query).sort("updated_at", -1).limit(50)
         docs = await cursor.to_list(length=50)
@@ -369,7 +370,9 @@ class TutorService:
         except Exception:
             return None
 
-        doc = await db.conversations.find_one({"_id": cid} if isinstance(cid, ObjectId) else {"id": str(cid)})
+        query = ({"_id": cid} if isinstance(cid, ObjectId) else {"id": str(cid)})
+        query["user_id"] = current_user_id()
+        doc = await db.conversations.find_one(query)
         if not doc:
             return None
 
@@ -385,5 +388,7 @@ class TutorService:
         except Exception:
             return False
 
-        res = await db.conversations.delete_one({"_id": cid} if isinstance(cid, ObjectId) else {"id": str(cid)})
+        query = ({"_id": cid} if isinstance(cid, ObjectId) else {"id": str(cid)})
+        query["user_id"] = current_user_id()
+        res = await db.conversations.delete_one(query)
         return res.deleted_count > 0

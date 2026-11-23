@@ -135,7 +135,7 @@ The engine presents exercises without revealing the correct answer beforehand an
 
 ### 3. Local AI Setup (Ollama - Free & 100% Local)
 
-Ollama is used as the default local AI engine. The application starts and all non-AI features work even if Ollama is not running.
+For local development, set `AI_PROVIDER=ollama` and run Ollama. AI is disabled by default in production unless a hosted provider is explicitly configured; all non-AI learning features remain available.
 
 #### A. Install Ollama
 - **macOS**: Download from [ollama.com](https://ollama.com) or run `brew install ollama`.
@@ -241,19 +241,30 @@ The progress service has isolated tests for empty activity, user scoping, explic
 
 ### Free Render preview
 
-The repository includes a Render Blueprint (`render.yaml`) for a free static frontend and Python API. To create both services, create a free MongoDB Atlas cluster, copy its connection string, then choose **New + → Blueprint** in Render and connect this GitHub repository. Enter the Atlas URI when Render prompts for `MONGODB_URI`. The Blueprint links the frontend origin to the API's CORS configuration and sets the frontend API URL automatically.
+The repository includes a Render Blueprint (`render.yaml`) for a static React frontend and Python API. Create a MongoDB Atlas cluster and database user, then create a Blueprint in Render connected to this repository. Supply `MONGODB_URI` and the S3-compatible storage values when prompted. Render links the frontend origin to API CORS and supplies the API origin to Vite automatically. The backend refuses a local MongoDB URI and local Ollama provider in production.
 
-This is suitable for a temporary preview only: free Render APIs sleep after 15 minutes of inactivity and have temporary storage, so uploaded files disappear after restarts. Ollama remains local to your computer and is unavailable to the hosted API. The app has no authentication; use a new, empty cloud database and do not put private notes or learner records in this public deployment.
+The API requires login. Passwords are PBKDF2-SHA256 hashed, sessions are random opaque tokens stored as hashes in MongoDB, and the browser session cookie is HttpOnly, SameSite Strict, and Secure in production. All application API routes except health and account registration/login require a session. Learner data reads and writes are scoped to that authenticated account in backend queries. The first account on a database adopts the existing single-learner `default` records so current data is retained; use a new Atlas database for an empty deployment.
 
-- Set `APP_ENV=production`, `DEBUG=false`, `MONGODB_URI`, `MONGODB_DB_NAME`, `UPLOAD_DIR`, and `CORS_ORIGINS` in the backend environment. Use a persistent MongoDB database and restrict CORS to the frontend's actual origin.
+Uploaded files use private S3-compatible object storage when `STORAGE_PROVIDER=s3`. Provide a bucket, endpoint, and credentials in Render; the API returns file contents only after checking the authenticated owner. Existing local uploads can be copied without deleting originals by running the migration script first in dry-run mode, then with `--apply` after checking its output:
+
+```bash
+cd backend
+python scripts/migrate_local_uploads_to_s3.py
+python scripts/migrate_local_uploads_to_s3.py --apply
+```
+
+Render's free API service may sleep after inactivity, and its local filesystem is temporary; user uploads are stored outside it. AI is disabled in Render by default. Hosted AI can be configured later with backend-only `AI_PROVIDER=openai-compatible`, `AI_API_BASE_URL`, `AI_API_KEY`, and `AI_MODEL` (and optionally `AI_EMBED_MODEL`). No AI vendor or paid provider is activated automatically.
+
+The Render API health check is `/api/v1/health`. Required production settings include `APP_ENV=production`, a remote `MONGODB_URI`, explicit `CORS_ORIGINS`, `STORAGE_PROVIDER=s3`, and the `S3_*` settings. Configure the corresponding secrets in Render's Environment UI; do not add them to Git. The complete variable list and local development defaults are in `backend/.env.example`.
+
+- Set `APP_ENV=production`, `DEBUG=false`, `MONGODB_URI`, `MONGODB_DB_NAME`, `UPLOAD_DIR`, `CORS_ORIGINS`, `STORAGE_PROVIDER`, and `S3_*` in the backend environment. Use a persistent MongoDB database and restrict CORS to the frontend's actual origin.
 - Set `VITE_API_BASE_URL` at frontend build time. The default `/api/v1` expects the frontend host or reverse proxy to route that path to FastAPI; a separately hosted API can use its absolute API base URL.
 - FastAPI health is available at `/api/v1/health`. A production process should bind to the host/port provided by the deployment environment and run without `--reload`.
-- Uploaded documents are stored on local disk under `UPLOAD_DIR`. That directory must be mounted on persistent storage; ephemeral deployment filesystems will lose uploads. The project does not currently integrate object storage.
-- The application has no authentication and uses a single `default` learner identity. Do not expose it as a public multi-user service until authentication and per-user authorization are implemented.
+- Uploaded documents are stored in the configured private S3-compatible bucket. `UPLOAD_DIR` is used only as a temporary staging area for processing on Render.
 - Progress only counts records explicitly marked `is_seeded: false` for that single learner. Older records without a reliable source marker are retained but excluded from current totals; review them manually before classifying them. No progress or user records are automatically deleted.
 - MongoDB and uploaded-file persistence are required for durable user data. Ollama and browser speech capabilities are optional; their unavailability should not prevent non-AI learning features.
 
-This repository is deployment-configurable, but it is not production-ready for public multi-user deployment because it has no authentication and relies on persistent local upload storage.
+This repository is prepared for a small public preview. Before broad production use, add operational controls such as rate limits, backups, and account recovery.
 
 ---
 
